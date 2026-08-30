@@ -1,0 +1,39 @@
+﻿[*.cs]
+indent_style = space
+indent_size = 4
+charset = utf-8
+end_of_line = crlf
+
+# Allman 大括号：所有结构均换行
+csharp_new_line_before_open_brace = types, methods, properties, accessors, control_blocks, anonymous_methods, lambdas_expression_body
+csharp_new_line_before_else = true
+csharp_new_line_before_catch = true
+csharp_new_line_before_finally = true
+
+# 流程语句强制大括号
+csharp_prefer_braces = true:error
+
+# 方法禁止 => 表达式体（构造、析构、本地函数均禁止）
+csharp_style_expression_bodied_constructors = false:error
+csharp_style_expression_bodied_methods = false:error
+csharp_style_expression_bodied_operators = false:error
+csharp_style_expression_bodied_deconstructors = false:error
+csharp_style_expression_bodied_local_functions = false:error
+
+# 属性、索引器允许 =>（例外）
+csharp_style_expression_bodied_properties = true:silent
+csharp_style_expression_bodied_indexers = true:silent
+csharp_style_expression_bodied_accessors = true:silent
+
+# switch case 内展开
+csharp_new_line_between_query_expression_clauses = true
+
+# 空格
+csharp_space_after_keywords_in_control_flow_statements = true
+csharp_space_around_binary_operators = before_and_after
+csharp_space_between_method_call_empty_parameter_list_parentheses = false
+csharp_space_between_method_declaration_empty_parameter_list_parentheses = false
+
+# 启用格式化分析
+# 已交由编译前 dotnet format 自动处理，不在编译时重复报警
+# dotnet_diagnostic.IDE0055.severity = warning

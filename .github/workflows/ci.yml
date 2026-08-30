@@ -1,0 +1,293 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [ "main", "master" ]
+  push:
+    tags: [ "v*" ]
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      exe_json: ${{ steps.classify.outputs.exe_json }}
+      lib_json: ${{ steps.classify.outputs.lib_json }}
+      tfm_json: ${{ steps.classify.outputs.tfm_json }}
+    steps:
+      - name: Determine .NET version
+        id: dotver
+        shell: pwsh
+        run: |
+          $year = [System.DateTime]::UtcNow.Year
+          $ver = "$($year - 2016).0.x"
+          "version=$ver" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ steps.dotver.outputs.version }}
+          dotnet-quality: ga
+
+      - run: dotnet restore
+      - run: dotnet build --no-restore -c Release
+
+      - name: Classify projects
+        id: classify
+        shell: pwsh
+        run: |
+          function Parse-Framework($fw) {
+            $fw = $fw.ToLower()
+            if ($fw -match '^net(\d+)\.(\d+)') {
+              return @{ Family = "net"; Major = [int]$Matches[1]; Minor = [int]$Matches[2] }
+            }
+            if ($fw -match '^netcoreapp(\d+)\.(\d+)') {
+              return @{ Family = "net"; Major = [int]$Matches[1]; Minor = [int]$Matches[2] }
+            }
+            if ($fw -match '^net4(\d)(\d?)$') {
+              $m = [int]$Matches[1]; $p = if ($Matches[2]) { [int]$Matches[2] } else { 0 }
+              return @{ Family = "netfx"; Major = 4; Minor = $m; Patch = $p }
+            }
+            if ($fw -match '^netstandard(\d+)\.(\d+)$') {
+              return @{ Family = "netstandard"; Major = [int]$Matches[1]; Minor = [int]$Matches[2] }
+            }
+            return @{ Family = "unknown"; Major = 0; Minor = 0 }
+          }
+
+          $exes = @(); $libs = @(); $allTfms = New-Object System.Collections.Generic.List[string]
+          Get-ChildItem -Recurse -Filter "*.csproj" | ForEach-Object {
+            $content = Get-Content $_.FullName -Raw
+            $isTest = $content -match '(Microsoft\.NET\.Test\.Sdk|MSTest|NUnit|xunit\.v3\.mtp-v2|xunit|TestingPlatformDotnetTestSupport)'
+            if ($isTest) { return }
+
+            $outType = if ($content -match '<OutputType>(.*?)</OutputType>') { $Matches[1] } else { "Library" }
+            $asmName = if ($content -match '<AssemblyName>(.*?)</AssemblyName>') { $Matches[1] } else { $_.BaseName }
+            $tfStr = if ($content -match '<TargetFrameworks>(.*?)</TargetFrameworks>') { $Matches[1] }
+                     elseif ($content -match '<TargetFramework>(.*?)</TargetFramework>') { $Matches[1] }
+                     else { "" }
+
+            $frameworks = $tfStr.Split(';', [StringSplitOptions]::RemoveEmptyEntries)
+            foreach ($fw in $frameworks) { if ($fw -and -not $allTfms.Contains($fw)) { $allTfms.Add($fw) } }
+
+            if ($outType -eq "Exe" -or $outType -eq "WinExe") {
+              $exes += [PSCustomObject]@{
+                Path = $_.FullName; Name = $_.BaseName; AssemblyName = $asmName
+                RawFrameworks = @($frameworks)
+                Frameworks = $frameworks | ForEach-Object { Parse-Framework $_ }
+              }
+            } else {
+              $libs += $_.FullName
+            }
+          }
+
+          $exeJson = $exes | ConvertTo-Json -Compress -Depth 3
+          $libJson = $libs | ConvertTo-Json -Compress
+          $tfmArr = $allTfms | Sort-Object | ForEach-Object { '"' + $_ + '"' }
+          $tfmJson = "[" + ($tfmArr -join ',') + "]"
+
+          $delim = "EOF_$([System.Guid]::NewGuid().ToString('N'))"
+          "exe_json<<$delim" >> $env:GITHUB_OUTPUT; $exeJson >> $env:GITHUB_OUTPUT; $delim >> $env:GITHUB_OUTPUT
+          "lib_json<<$delim" >> $env:GITHUB_OUTPUT; $libJson >> $env:GITHUB_OUTPUT; $delim >> $env:GITHUB_OUTPUT
+          "tfm_json<<$delim" >> $env:GITHUB_OUTPUT; $tfmJson >> $env:GITHUB_OUTPUT; $delim >> $env:GITHUB_OUTPUT
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine .NET version
+        id: dotver
+        shell: pwsh
+        run: |
+          $year = [System.DateTime]::UtcNow.Year
+          $ver = "$($year - 2016).0.x"
+          "version=$ver" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ steps.dotver.outputs.version }}
+          dotnet-quality: ga
+
+      - run: dotnet restore
+      - run: dotnet test -c Release --no-restore
+        shell: pwsh
+
+  publish-self-contained:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        rid: [win-x64, win-arm64, linux-x64, linux-arm64, osx-x64, osx-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine .NET version
+        id: dotver
+        shell: pwsh
+        run: |
+          $year = [System.DateTime]::UtcNow.Year
+          $ver = "$($year - 2016).0.x"
+          "version=$ver" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ steps.dotver.outputs.version }}
+          dotnet-quality: ga
+
+      - run: dotnet restore
+
+      - name: Parse exe info and publish
+        shell: pwsh
+        env:
+          EXE_JSON: ${{ needs.build.outputs.exe_json }}
+        run: |
+          function Get-Highest {
+            param($frameworks)
+            $valid = $frameworks | Where-Object { -not ($_.Family -eq "net" -and $_.Major -lt 3) }
+            $valid | Sort-Object { @{net=3;netfx=2;netstandard=1}[$_.Family] }, `
+              { $_.Major }, { $_.Minor } -Descending | Select-Object -First 1
+          }
+          $exes = $env:EXE_JSON | ConvertFrom-Json
+          $rid = '${{ matrix.rid }}'
+
+          foreach ($exe in $exes) {
+            $best = Get-Highest $exe.Frameworks
+            if (-not $best) { Write-Host "跳过 $($exe.Name): 无可用框架"; continue }
+            $fw = $exe.RawFrameworks | Where-Object { $_ -match "net$($best.Major)[.$]$($best.Minor)" } | Select-Object -First 1
+            if (-not $fw) { $fw = $exe.RawFrameworks | Where-Object { $_ -match "net$($best.Major)[.$]" } | Select-Object -First 1 }
+            if (-not $fw) { $fw = $exe.RawFrameworks[0] }
+
+            $outDir = "publish/tmp/$($exe.Name)-$rid"
+            try {
+              dotnet publish $exe.Path -c Release -f $fw -r $rid --self-contained true -o $outDir
+              if ($LASTEXITCODE -ne 0) { throw "exit $LASTEXITCODE" }
+              Compress-Archive -Path "$outDir/*" -DestinationPath "publish/$($exe.Name)-$rid.zip" -Force
+              Remove-Item $outDir -Recurse -Force -ErrorAction SilentlyContinue
+            } catch { Write-Host "跳过 $($exe.Name)-$rid (不兼容)" }
+          }
+          $LASTEXITCODE = 0
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zips-sc-${{ matrix.rid }}
+          path: publish/*.zip
+
+  publish-fdd:
+    needs: build
+    strategy:
+      matrix:
+        fw: ${{ fromJson(needs.build.outputs.tfm_json) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine .NET version
+        id: dotver
+        shell: pwsh
+        run: |
+          $year = [System.DateTime]::UtcNow.Year
+          $ver = "$($year - 2016).0.x"
+          "version=$ver" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ steps.dotver.outputs.version }}
+          dotnet-quality: ga
+
+      - run: dotnet restore
+
+      - name: Publish FDD and zip
+        shell: pwsh
+        env:
+          EXE_JSON: ${{ needs.build.outputs.exe_json }}
+          TFM_JSON: ${{ needs.build.outputs.tfm_json }}
+        run: |
+          $exes = $env:EXE_JSON | ConvertFrom-Json
+          $fw = '${{ matrix.fw }}'
+          $matched = $exes | Where-Object { $_.RawFrameworks -contains $fw }
+          if (-not $matched) { Write-Host "无项目支持 $fw"; exit 0 }
+          $projNames = ($matched | ForEach-Object { $_.Name }) -join "+"
+          $outDir = "publish/tmp/fdd-$projNames-$fw"
+          New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+          foreach ($exe in $matched) {
+            Write-Host "FDD $($exe.Name) -> $fw"
+            dotnet publish $exe.Path -c Release -f $fw -o $outDir
+            if ($LASTEXITCODE -ne 0) { throw "$($exe.Name)-$fw 发布失败" }
+          }
+          Compress-Archive -Path "$outDir/*" -DestinationPath "publish/$projNames-$fw.zip" -Force
+          Remove-Item $outDir -Recurse -Force -ErrorAction SilentlyContinue
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zips-fdd-${{ matrix.fw }}
+          path: publish/*.zip
+
+  pack:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine .NET version
+        id: dotver
+        shell: pwsh
+        run: |
+          $year = [System.DateTime]::UtcNow.Year
+          $ver = "$($year - 2016).0.x"
+          "version=$ver" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ steps.dotver.outputs.version }}
+          dotnet-quality: ga
+
+      - run: dotnet restore
+
+      - name: Pack libraries
+        shell: pwsh
+        env:
+          LIB_JSON: ${{ needs.build.outputs.lib_json }}
+        run: |
+          $paths = $env:LIB_JSON | ConvertFrom-Json
+          foreach ($p in $paths) {
+            Write-Host "Packing: $(Split-Path $p -Leaf)"
+            try {
+              dotnet pack $p -c Release -o publish/nupkg
+              if ($LASTEXITCODE -ne 0) { throw "exit $LASTEXITCODE" }
+            } catch { Write-Host "跳过 $(Split-Path $p -Leaf) (不兼容)" }
+          }
+          $LASTEXITCODE = 0
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nupkg
+          path: publish/nupkg/*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, publish-self-contained, publish-fdd, pack]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+
+      - name: Collect all artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path publish -Force | Out-Null
+          Get-ChildItem -Recurse -Filter "*.zip" | Move-Item -Destination publish/ -Force
+          Get-ChildItem -Recurse -Filter "*.nupkg" | Move-Item -Destination publish/ -Force
+
+      - name: Delete existing release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release delete $tag --cleanup-tag --yes --repo ${{ github.repository }}
+        continue-on-error: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: "publish/*"
+          generate_release_notes: true

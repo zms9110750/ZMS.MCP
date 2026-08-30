@@ -1,0 +1,10 @@
+changelog:
+  categories:
+    - title: 🚀 新功能
+      labels: ["enhancement"]
+    - title: 🐛 修复
+      labels: ["bug"]
+    - title: 📖 文档
+      labels: ["documentation"]
+    - title: 🔧 维护
+      labels: ["*"]

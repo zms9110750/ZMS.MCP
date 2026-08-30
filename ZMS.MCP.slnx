@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ZMS.MCP.Cli/ZMS.MCP.Cli.csproj" />
+  </Folder>
+  <Folder Name="/test/">
+    <Project Path="test/ZMS.MCP.Test/ZMS.MCP.Test.csproj" />
+  </Folder>
+</Solution>
