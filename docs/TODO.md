@@ -1,4 +1,4 @@
-{action,uri,head,body}
+﻿{action,uri,head,body}
 get读，head元数据，post创建，追加，put，覆写，patch替换部分，delete删除，move，copy，移动，复制。
 
 ## 破坏
