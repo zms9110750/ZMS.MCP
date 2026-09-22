@@ -46,13 +46,25 @@ public static class MsBuildEvaluator
 {
     private const int TimeoutSeconds = 180;
 
-    /// <summary>会参与项目声明的文件；它们比缓存新就说明缓存过期。</summary>
+    /// <summary>向上查找 props 链的最大层数，避免在深层目录里一路扫到盘根。</summary>
+    private const int MaxAncestorDepth = 16;
+
+    /// <summary>缓存条目上限；评估很贵、条目很少，超限就整体丢弃。</summary>
+    private const int MaxCacheEntries = 64;
+
+    /// <summary>时间戳比较的容差：文件系统粒度（FAT 2 秒、网络盘）会把同秒内的修改判成没变。</summary>
+    private static readonly TimeSpan TimestampTolerance = TimeSpan.FromSeconds(1);
+
+    /// <summary>会参与项目声明的文件；比缓存新就说明缓存过期。</summary>
     private static readonly string[] WatchedFileNames =
     [
         "Directory.Build.props",
         "Directory.Build.targets",
-        "Directory.Packages.props",
         "Directory.Build.props.user",
+        "Directory.Packages.props",
+        "global.json",
+        "NuGet.config",
+        "nuget.config",
     ];
 
     private static readonly ConcurrentDictionary<string, CacheEntry> Cache = new(StringComparer.OrdinalIgnoreCase);
@@ -64,6 +76,9 @@ public static class MsBuildEvaluator
     /// </summary>
     /// <param name="projectPath">.csproj 路径。</param>
     /// <param name="refresh">true 时跳过缓存。</param>
+    /// <exception cref="FileNotFoundException">项目文件不存在。</exception>
+    /// <exception cref="TimeoutException">评估超时。</exception>
+    /// <exception cref="InvalidOperationException">评估失败（未还原、SDK 不匹配、输出无法解析等）。</exception>
     public static MsBuildEvaluation Evaluate(string projectPath, bool refresh = false)
     {
         string fullPath = Path.GetFullPath(projectPath);
@@ -78,6 +93,11 @@ public static class MsBuildEvaluator
         }
 
         MsBuildEvaluation evaluation = Run(fullPath);
+        if (Cache.Count >= MaxCacheEntries)
+        {
+            Cache.Clear();
+        }
+
         Cache[fullPath] = new CacheEntry(evaluation, DateTime.UtcNow);
         return evaluation;
     }
@@ -143,17 +163,32 @@ public static class MsBuildEvaluator
                 // 进程可能已退出，忽略
             }
 
-            return (-1, $"dotnet msbuild timed out after {TimeoutSeconds}s.");
+            Observe(stdout);
+            Observe(stderr);
+            throw new TimeoutException(
+                $"dotnet msbuild timed out after {TimeoutSeconds}s: {string.Join(' ', arguments)}");
         }
 
         string output = stdout.GetAwaiter().GetResult() + Environment.NewLine + stderr.GetAwaiter().GetResult();
         return (process.ExitCode, output);
     }
 
+    /// <summary>进程已被杀，等读取任务落地，避免留下未观察的任务。</summary>
+    private static void Observe(Task<string> task)
+    {
+        try
+        {
+            task.Wait(TimeSpan.FromSeconds(5));
+        }
+        catch (Exception)
+        {
+            // 只为不让它变成未观察任务，异常一律吞掉
+        }
+    }
+
     private static MsBuildEvaluation Parse(string output)
     {
-        string json = ExtractJson(output);
-        using JsonDocument document = JsonDocument.Parse(json);
+        using JsonDocument document = ExtractJsonDocument(output);
 
         Dictionary<string, string> properties = new(StringComparer.OrdinalIgnoreCase);
         if (document.RootElement.TryGetProperty("Properties", out JsonElement propertyElement))
@@ -173,20 +208,50 @@ public static class MsBuildEvaluator
     }
 
     /// <summary>
-    /// 从输出里截出 JSON 对象。MSBuild 会在结果前后夹带提示信息（如 NETSDK1057 预览版提示），
-    /// 所以取第一个 <c>{</c> 到最后一个 <c>}</c>。
+    /// 从输出里找出 JSON 对象。MSBuild 会在结果前后夹带提示信息（如 NETSDK1057 预览版提示），
+    /// 提示里也可能出现大括号，所以按候选边界逐个尝试解析，而不是简单地"第一个 { 到最后一个 }"。
     /// </summary>
-    private static string ExtractJson(string output)
+    private static JsonDocument ExtractJsonDocument(string output)
     {
         string text = output.Replace("\uFEFF", "").Trim();
-        int start = text.IndexOf('{');
-        int end = text.LastIndexOf('}');
-        if (start < 0 || end <= start)
+        List<int> starts = CollectPositions(text, '{', 8, fromEnd: false);
+        List<int> ends = CollectPositions(text, '}', 8, fromEnd: true);
+
+        foreach (int start in starts)
         {
-            throw new InvalidOperationException($"MSBuild output is not JSON: {Truncate(output)}");
+            foreach (int end in ends)
+            {
+                if (end <= start)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    return JsonDocument.Parse(text[start..(end + 1)]);
+                }
+                catch (JsonException)
+                {
+                    // 换下一组候选边界
+                }
+            }
         }
 
-        return text[start..(end + 1)];
+        throw new InvalidOperationException(
+            $"MSBuild output does not contain a parsable JSON object: {Truncate(output)}");
+    }
+
+    private static List<int> CollectPositions(string text, char value, int limit, bool fromEnd)
+    {
+        List<int> positions = [];
+        int index = fromEnd ? text.LastIndexOf(value) : text.IndexOf(value);
+        while (index >= 0 && positions.Count < limit)
+        {
+            positions.Add(index);
+            index = fromEnd ? text.LastIndexOf(value, index - 1) : text.IndexOf(value, index + 1);
+        }
+
+        return positions;
     }
 
     private static List<string> ReadItems(JsonDocument document, string itemName)
@@ -219,11 +284,12 @@ public static class MsBuildEvaluator
 
     private static bool IsStale(string projectPath, CacheEntry entry)
     {
+        DateTime threshold = entry.ValidatedAtUtc - TimestampTolerance;
         foreach (string file in CandidateInputFiles(projectPath))
         {
             try
             {
-                if (File.Exists(file) && File.GetLastWriteTimeUtc(file) > entry.ValidatedAtUtc)
+                if (File.Exists(file) && File.GetLastWriteTimeUtc(file) >= threshold)
                 {
                     return true;
                 }
@@ -237,13 +303,14 @@ public static class MsBuildEvaluator
         return false;
     }
 
-    /// <summary>项目文件 + 逐级向上的 props/targets/packages 文件。</summary>
+    /// <summary>项目文件 + 逐级向上的 props/targets/packages 文件（层数有上限）。</summary>
     private static IEnumerable<string> CandidateInputFiles(string projectPath)
     {
         yield return projectPath;
 
         DirectoryInfo? directory = new FileInfo(projectPath).Directory;
-        while (directory != null)
+        int depth = 0;
+        while (directory != null && depth < MaxAncestorDepth)
         {
             foreach (string name in WatchedFileNames)
             {
@@ -251,12 +318,26 @@ public static class MsBuildEvaluator
             }
 
             directory = directory.Parent;
+            depth++;
         }
     }
 
     private static string Truncate(string text)
     {
+        const int limit = 2000;
         string trimmed = text.Trim();
-        return trimmed.Length <= 2000 ? trimmed : trimmed[..2000] + "…";
+        if (trimmed.Length <= limit)
+        {
+            return trimmed;
+        }
+
+        int cut = limit;
+        if (char.IsHighSurrogate(trimmed[cut - 1]))
+        {
+            // 不要从代理对中间切开
+            cut--;
+        }
+
+        return trimmed[..cut] + "…";
     }
 }

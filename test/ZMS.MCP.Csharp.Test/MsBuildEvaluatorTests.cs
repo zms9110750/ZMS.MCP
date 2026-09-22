@@ -54,7 +54,8 @@ public sealed class MsBuildEvaluatorTests
         MsBuildEvaluation evaluation = MsBuildEvaluator.Evaluate(SelfProjectPath());
 
         Assert.Equal("net10.0", evaluation.GetProperty("TargetFramework"));
-        Assert.Equal("zms9110750.ZMS.MCP.Csharp", evaluation.GetProperty("AssemblyName"));
+        // 程序集名来自 Directory.Build.props（zms9110750.<项目名>），不写死全名以免 props 重构即碎
+        Assert.EndsWith("ZMS.MCP.Csharp", evaluation.GetProperty("AssemblyName"));
     }
 
     [Fact]
@@ -109,10 +110,47 @@ public sealed class MsBuildEvaluatorTests
     }
 
     [Fact]
+    public void Evaluate_invalidates_cache_when_project_file_is_touched()
+    {
+        string project = SelfProjectPath();
+        DateTime originalTimestamp = File.GetLastWriteTimeUtc(project);
+
+        MsBuildEvaluation first = MsBuildEvaluator.Evaluate(project, refresh: true);
+        try
+        {
+            // 把项目文件的时间戳推到未来：缓存必须判为过期并重新评估
+            File.SetLastWriteTimeUtc(project, DateTime.UtcNow.AddSeconds(5));
+            MsBuildEvaluation second = MsBuildEvaluator.Evaluate(project, refresh: false);
+
+            Assert.NotSame(first, second);
+        }
+        finally
+        {
+            File.SetLastWriteTimeUtc(project, originalTimestamp);
+            MsBuildEvaluator.Evaluate(project, refresh: true);
+        }
+    }
+
+    [Fact]
     public void Evaluate_missing_project_throws()
     {
         string missing = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"), "Missing.csproj");
 
         Assert.Throws<FileNotFoundException>(() => MsBuildEvaluator.Evaluate(missing));
+    }
+
+    [Fact]
+    public void Evaluate_broken_project_file_throws_with_context()
+    {
+        // 故意留一个坏项目文件（测试结束后不主动删除，交给系统清理临时目录）
+        string directory = Path.Combine(Path.GetTempPath(), "zms-mcp-csharp-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        string project = Path.Combine(directory, "Broken.csproj");
+        File.WriteAllText(project, "<Project>this is not a valid msbuild project</Project>");
+
+        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
+            () => MsBuildEvaluator.Evaluate(project));
+
+        Assert.Contains("Broken.csproj", exception.Message);
     }
 }
