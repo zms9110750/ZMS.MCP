@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text.Json;
 using Xunit;
 using ZMS.MCP.Csharp.Roslyn;
 
@@ -8,7 +9,8 @@ namespace ZMS.MCP.Csharp.Test;
 /// MSBuild 评估层的测试。
 ///
 /// 仓库根由**编译期**写进程序集元数据（构建输出被重定向到仓库外，运行时靠向上查找定位不到）。
-/// 这些用例要求本仓库已经还原过（有 obj/project.assets.json）。
+/// 评估类用例要求本仓库已经还原过（有 obj/project.assets.json）；
+/// 缓存失效与 JSON 解析的用例只用临时目录里的假文件，不碰仓库里的真实文件。
 /// </summary>
 public sealed class MsBuildEvaluatorTests
 {
@@ -47,6 +49,18 @@ public sealed class MsBuildEvaluatorTests
     {
         return Path.Combine(RepositoryRoot(), "src", "ZMS.MCP.Csharp", "ZMS.MCP.Csharp.csproj");
     }
+
+    /// <summary>在系统临时目录里造一个假项目（只用于缓存与解析的纯逻辑用例，不评估 MSBuild）。</summary>
+    private static string NewFakeProject(out string directory)
+    {
+        directory = Path.Combine(Path.GetTempPath(), "zms-mcp-csharp-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        string project = Path.Combine(directory, "Fake.csproj");
+        File.WriteAllText(project, "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>");
+        return project;
+    }
+
+    // ───────── 真实项目评估 ─────────
 
     [Fact]
     public void Evaluate_self_project_returns_target_framework()
@@ -110,28 +124,6 @@ public sealed class MsBuildEvaluatorTests
     }
 
     [Fact]
-    public void Evaluate_invalidates_cache_when_project_file_is_touched()
-    {
-        string project = SelfProjectPath();
-        DateTime originalTimestamp = File.GetLastWriteTimeUtc(project);
-
-        MsBuildEvaluation first = MsBuildEvaluator.Evaluate(project, refresh: true);
-        try
-        {
-            // 把项目文件的时间戳推到未来：缓存必须判为过期并重新评估
-            File.SetLastWriteTimeUtc(project, DateTime.UtcNow.AddSeconds(5));
-            MsBuildEvaluation second = MsBuildEvaluator.Evaluate(project, refresh: false);
-
-            Assert.NotSame(first, second);
-        }
-        finally
-        {
-            File.SetLastWriteTimeUtc(project, originalTimestamp);
-            MsBuildEvaluator.Evaluate(project, refresh: true);
-        }
-    }
-
-    [Fact]
     public void Evaluate_missing_project_throws()
     {
         string missing = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"), "Missing.csproj");
@@ -143,14 +135,122 @@ public sealed class MsBuildEvaluatorTests
     public void Evaluate_broken_project_file_throws_with_context()
     {
         // 故意留一个坏项目文件（测试结束后不主动删除，交给系统清理临时目录）
-        string directory = Path.Combine(Path.GetTempPath(), "zms-mcp-csharp-test-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(directory);
-        string project = Path.Combine(directory, "Broken.csproj");
+        string project = NewFakeProject(out string directory);
         File.WriteAllText(project, "<Project>this is not a valid msbuild project</Project>");
 
         InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
             () => MsBuildEvaluator.Evaluate(project));
 
-        Assert.Contains("Broken.csproj", exception.Message);
+        Assert.Contains("Fake.csproj", exception.Message);
+        Assert.NotNull(directory);
+    }
+
+    // ───────── 缓存失效（纯逻辑，用假文件） ─────────
+
+    [Fact]
+    public void IsStale_returns_false_when_inputs_unchanged()
+    {
+        string project = NewFakeProject(out string directory);
+        File.WriteAllText(Path.Combine(directory, "Directory.Build.props"), "<Project></Project>");
+
+        Dictionary<string, DateTime> snapshot = MsBuildEvaluator.SnapshotInputs(project);
+
+        Assert.False(MsBuildEvaluator.IsStale(project, snapshot));
+    }
+
+    [Fact]
+    public void IsStale_detects_touched_project_file()
+    {
+        string project = NewFakeProject(out string directory);
+        Dictionary<string, DateTime> snapshot = MsBuildEvaluator.SnapshotInputs(project);
+
+        // 推到未来，保证跨过时间戳容差
+        File.SetLastWriteTimeUtc(project, DateTime.UtcNow.AddSeconds(5));
+
+        Assert.True(MsBuildEvaluator.IsStale(project, snapshot));
+        Assert.NotNull(directory);
+    }
+
+    [Fact]
+    public void IsStale_detects_touched_watched_file()
+    {
+        string project = NewFakeProject(out string directory);
+        string props = Path.Combine(directory, "Directory.Build.props");
+        File.WriteAllText(props, "<Project></Project>");
+        Dictionary<string, DateTime> snapshot = MsBuildEvaluator.SnapshotInputs(project);
+
+        File.SetLastWriteTimeUtc(props, DateTime.UtcNow.AddSeconds(5));
+
+        Assert.True(MsBuildEvaluator.IsStale(project, snapshot));
+    }
+
+    [Fact]
+    public void IsStale_detects_deleted_watched_file()
+    {
+        string project = NewFakeProject(out string directory);
+        string props = Path.Combine(directory, "Directory.Build.props");
+        File.WriteAllText(props, "<Project></Project>");
+        Dictionary<string, DateTime> snapshot = MsBuildEvaluator.SnapshotInputs(project);
+
+        // 删的是本用例刚创建的临时文件
+        File.Delete(props);
+
+        Assert.True(MsBuildEvaluator.IsStale(project, snapshot));
+    }
+
+    [Fact]
+    public void IsStale_detects_appeared_watched_file()
+    {
+        string project = NewFakeProject(out string directory);
+        Dictionary<string, DateTime> snapshot = MsBuildEvaluator.SnapshotInputs(project);
+
+        File.WriteAllText(Path.Combine(directory, "Directory.Build.props"), "<Project></Project>");
+
+        Assert.True(MsBuildEvaluator.IsStale(project, snapshot));
+    }
+
+    // ───────── MSBuild 输出解析 ─────────
+
+    [Fact]
+    public void ExtractJsonDocument_parses_json_with_surrounding_noise()
+    {
+        string output = "NETSDK1057: 你正在使用 .NET 的预览版。\n{\"Properties\":{\"A\":\"1\"}}\n生成成功。";
+
+        using JsonDocument document = MsBuildEvaluator.ExtractJsonDocument(output);
+
+        Assert.Equal("1", document.RootElement.GetProperty("Properties").GetProperty("A").GetString());
+    }
+
+    [Fact]
+    public void ExtractJsonDocument_skips_brace_in_noise()
+    {
+        // 噪声里先出现一个 '{'，真正的 JSON 在后面
+        string output = "警告: 无法解析 \"{bad\"\n{\"Properties\":{\"A\":\"2\"}}";
+
+        using JsonDocument document = MsBuildEvaluator.ExtractJsonDocument(output);
+
+        Assert.Equal("2", document.RootElement.GetProperty("Properties").GetProperty("A").GetString());
+    }
+
+    [Fact]
+    public void ExtractJsonDocument_throws_when_no_json()
+    {
+        string output = "这里没有任何 JSON 对象";
+
+        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
+            () => MsBuildEvaluator.ExtractJsonDocument(output));
+
+        Assert.Contains("does not contain a parsable JSON object", exception.Message);
+    }
+
+    [Fact]
+    public void ExtractJsonDocument_handles_output_starting_with_closing_brace()
+    {
+        // 输出以 '}' 开头：候选边界收集不能越界（回归 CollectPositions 的 index == 0 守卫）
+        string output = "}\n{\"Properties\":{\"A\":\"3\"}}";
+
+        using JsonDocument document = MsBuildEvaluator.ExtractJsonDocument(output);
+
+        Assert.Equal("3", document.RootElement.GetProperty("Properties").GetProperty("A").GetString());
     }
 }

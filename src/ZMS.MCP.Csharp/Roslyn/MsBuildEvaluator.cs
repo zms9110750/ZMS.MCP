@@ -39,7 +39,7 @@ public sealed class MsBuildEvaluation
 /// 属性（<c>DefineConstants</c> / <c>TargetFramework</c> / <c>AssemblyName</c> …）、
 /// 编译项（含 props 注入与生成的文件）、引用路径（含传递依赖与框架引用）。
 ///
-/// 不把 MSBuild 拉进进程 —— 起一次 <c>dotnet msbuild</c>，结果按输入文件时间戳缓存。
+/// 不把 MSBuild 拉进进程 —— 起一次 <c>dotnet msbuild</c>，结果按输入文件快照缓存。
 /// 评估失败（未还原、SDK 不匹配等）由调用方决定降级，本类只负责如实抛出。
 /// </summary>
 public static class MsBuildEvaluator
@@ -52,10 +52,10 @@ public static class MsBuildEvaluator
     /// <summary>缓存条目上限；评估很贵、条目很少，超限就整体丢弃。</summary>
     private const int MaxCacheEntries = 64;
 
-    /// <summary>时间戳比较的容差：文件系统粒度（FAT 2 秒、网络盘）会把同秒内的修改判成没变。</summary>
-    private static readonly TimeSpan TimestampTolerance = TimeSpan.FromSeconds(1);
+    /// <summary>解析 JSON 时最多尝试的候选边界数（起点与终点各这么多，组合起来逐个试）。</summary>
+    private const int MaxJsonBoundaryCandidates = 8;
 
-    /// <summary>会参与项目声明的文件；比缓存新就说明缓存过期。</summary>
+    /// <summary>会参与项目声明的文件；它们出现、消失或变动都说明缓存过期。</summary>
     private static readonly string[] WatchedFileNames =
     [
         "Directory.Build.props",
@@ -69,10 +69,10 @@ public static class MsBuildEvaluator
 
     private static readonly ConcurrentDictionary<string, CacheEntry> Cache = new(StringComparer.OrdinalIgnoreCase);
 
-    private sealed record CacheEntry(MsBuildEvaluation Evaluation, DateTime ValidatedAtUtc);
+    private sealed record CacheEntry(MsBuildEvaluation Evaluation, IReadOnlyDictionary<string, DateTime> InputTimestamps);
 
     /// <summary>
-    /// 求值一个项目。结果带缓存，输入文件变动后自动失效。
+    /// 求值一个项目。结果带缓存，输入文件出现 / 消失 / 变动后自动失效。
     /// </summary>
     /// <param name="projectPath">.csproj 路径。</param>
     /// <param name="refresh">true 时跳过缓存。</param>
@@ -87,7 +87,9 @@ public static class MsBuildEvaluator
             throw new FileNotFoundException($"Project file not found: {fullPath}");
         }
 
-        if (!refresh && Cache.TryGetValue(fullPath, out CacheEntry? cached) && !IsStale(fullPath, cached))
+        if (!refresh &&
+            Cache.TryGetValue(fullPath, out CacheEntry? cached) &&
+            !IsStale(fullPath, cached.InputTimestamps))
         {
             return cached.Evaluation;
         }
@@ -98,7 +100,7 @@ public static class MsBuildEvaluator
             Cache.Clear();
         }
 
-        Cache[fullPath] = new CacheEntry(evaluation, DateTime.UtcNow);
+        Cache[fullPath] = new CacheEntry(evaluation, SnapshotInputs(fullPath));
         return evaluation;
     }
 
@@ -106,6 +108,65 @@ public static class MsBuildEvaluator
     public static void ClearCache()
     {
         Cache.Clear();
+    }
+
+    /// <summary>给候选输入文件拍一份时间戳快照（只记存在的文件）。</summary>
+    internal static Dictionary<string, DateTime> SnapshotInputs(string projectPath)
+    {
+        Dictionary<string, DateTime> snapshot = new(StringComparer.OrdinalIgnoreCase);
+        foreach (string file in CandidateInputFiles(projectPath))
+        {
+            try
+            {
+                if (File.Exists(file))
+                {
+                    snapshot[file] = File.GetLastWriteTimeUtc(file);
+                }
+            }
+            catch (Exception)
+            {
+                // 读不到就跳过
+            }
+        }
+
+        return snapshot;
+    }
+
+    /// <summary>
+    /// 与快照比对：候选文件"出现 / 消失 / 时间戳变动"都算过期。
+    /// 已知限制：文件系统粒度粗（FAT 2 秒、部分网络盘）时，同一时间片内的改动可能看不出
+    /// mtime 变化而漏判 —— 这里不做时间容差，因为容差会把"没变"也判成脏，导致缓存永不命中。
+    /// </summary>
+    internal static bool IsStale(string projectPath, IReadOnlyDictionary<string, DateTime> snapshot)
+    {
+        foreach (string file in CandidateInputFiles(projectPath))
+        {
+            bool recorded = snapshot.TryGetValue(file, out DateTime timestamp);
+            bool exists;
+            DateTime current;
+            try
+            {
+                exists = File.Exists(file);
+                current = exists ? File.GetLastWriteTimeUtc(file) : default;
+            }
+            catch (Exception)
+            {
+                continue;
+            }
+
+            if (exists != recorded)
+            {
+                // 监视文件出现或消失
+                return true;
+            }
+
+            if (exists && current != timestamp)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static MsBuildEvaluation Run(string projectPath)
@@ -163,26 +224,27 @@ public static class MsBuildEvaluator
                 // 进程可能已退出，忽略
             }
 
-            Observe(stdout);
-            Observe(stderr);
+            // 杀完把已捕获的输出带回来，方便定位卡在哪一步
+            string captured = Observe(stdout) + Environment.NewLine + Observe(stderr);
             throw new TimeoutException(
-                $"dotnet msbuild timed out after {TimeoutSeconds}s: {string.Join(' ', arguments)}");
+                $"dotnet msbuild timed out after {TimeoutSeconds}s: {string.Join(' ', arguments)}" +
+                $"{Environment.NewLine}{Truncate(captured)}");
         }
 
         string output = stdout.GetAwaiter().GetResult() + Environment.NewLine + stderr.GetAwaiter().GetResult();
         return (process.ExitCode, output);
     }
 
-    /// <summary>进程已被杀，等读取任务落地，避免留下未观察的任务。</summary>
-    private static void Observe(Task<string> task)
+    /// <summary>进程已被杀，等读取任务落地（避免留下未观察的任务），并尽量带回已捕获的输出。</summary>
+    private static string Observe(Task<string> task)
     {
         try
         {
-            task.Wait(TimeSpan.FromSeconds(5));
+            return task.Wait(TimeSpan.FromSeconds(5)) ? task.Result : "";
         }
         catch (Exception)
         {
-            // 只为不让它变成未观察任务，异常一律吞掉
+            return "";
         }
     }
 
@@ -211,11 +273,11 @@ public static class MsBuildEvaluator
     /// 从输出里找出 JSON 对象。MSBuild 会在结果前后夹带提示信息（如 NETSDK1057 预览版提示），
     /// 提示里也可能出现大括号，所以按候选边界逐个尝试解析，而不是简单地"第一个 { 到最后一个 }"。
     /// </summary>
-    private static JsonDocument ExtractJsonDocument(string output)
+    internal static JsonDocument ExtractJsonDocument(string output)
     {
         string text = output.Replace("\uFEFF", "").Trim();
-        List<int> starts = CollectPositions(text, '{', 8, fromEnd: false);
-        List<int> ends = CollectPositions(text, '}', 8, fromEnd: true);
+        List<int> starts = CollectPositions(text, '{', MaxJsonBoundaryCandidates, fromEnd: false);
+        List<int> ends = CollectPositions(text, '}', MaxJsonBoundaryCandidates, fromEnd: true);
 
         foreach (int start in starts)
         {
@@ -248,7 +310,20 @@ public static class MsBuildEvaluator
         while (index >= 0 && positions.Count < limit)
         {
             positions.Add(index);
-            index = fromEnd ? text.LastIndexOf(value, index - 1) : text.IndexOf(value, index + 1);
+            if (fromEnd)
+            {
+                if (index == 0)
+                {
+                    // LastIndexOf 的 startIndex 必须 >= 0
+                    break;
+                }
+
+                index = text.LastIndexOf(value, index - 1);
+            }
+            else
+            {
+                index = text.IndexOf(value, index + 1);
+            }
         }
 
         return positions;
@@ -280,27 +355,6 @@ public static class MsBuildEvaluator
         }
 
         return values;
-    }
-
-    private static bool IsStale(string projectPath, CacheEntry entry)
-    {
-        DateTime threshold = entry.ValidatedAtUtc - TimestampTolerance;
-        foreach (string file in CandidateInputFiles(projectPath))
-        {
-            try
-            {
-                if (File.Exists(file) && File.GetLastWriteTimeUtc(file) >= threshold)
-                {
-                    return true;
-                }
-            }
-            catch (Exception)
-            {
-                // 读不到时间戳就当没过期，下一轮再看
-            }
-        }
-
-        return false;
     }
 
     /// <summary>项目文件 + 逐级向上的 props/targets/packages 文件（层数有上限）。</summary>
