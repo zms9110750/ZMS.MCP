@@ -10,7 +10,11 @@ namespace ZMS.MCP.Csharp.Tools;
 public static class ProjectTools
 {
     [McpServerTool(ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
-    [Description("Scan a folder for .sln / .slnx / .csproj files. Returns paths relative to the folder, grouped by kind. bin/obj/.git are skipped.")]
+    [Description(
+        "Scan a folder for .sln / .slnx / .csproj. Output: one block per solution — " +
+        "'<solution path>(described+extra)' then its described projects as a tree (├─ / └─), " +
+        "then the projects that exist under the solution folder but are NOT described by it, prefixed with '-'. " +
+        "Projects not covered by any solution follow as plain lines. bin/obj/.git are skipped.")]
     public static string ScanProjects(
         [Description("Absolute folder path to scan")] string folder,
         [Description("Max recursion depth (default 4)")] int depth = 4,
@@ -18,21 +22,38 @@ public static class ProjectTools
     {
         return ToolGuard.Run(() =>
         {
-            IReadOnlyList<string> files = SolutionExplorer.Scan(folder, depth, kinds);
-            if (files.Count == 0)
+            ScanResult result = SolutionExplorer.ScanTree(folder, depth, kinds);
+            if (result.Solutions.Count == 0 && result.LooseProjects.Count == 0)
             {
                 return $"No solution/project files under {Path.GetFullPath(folder)} (depth {depth}).";
             }
 
             StringBuilder builder = new();
-            builder.AppendLine($"# {files.Count} file(s) under {Path.GetFullPath(folder)} (depth {depth})");
-            builder.AppendLine();
-            foreach (string file in files)
+            foreach (ScanSolutionGroup group in result.Solutions)
             {
-                builder.AppendLine("- " + file);
+                builder.AppendLine($"{group.SolutionPath}({group.Projects.Count}+{group.ExtraProjects.Count})");
+                for (int index = 0; index < group.Projects.Count; index++)
+                {
+                    // 树状收尾：没有额外关系时，最后一个描述项目用 └─
+                    bool isLast = index == group.Projects.Count - 1;
+                    string connector = isLast && group.ExtraProjects.Count == 0 ? "└─" : "├─";
+                    builder.AppendLine(connector + group.Projects[index]);
+                }
+
+                foreach (string extra in group.ExtraProjects)
+                {
+                    builder.AppendLine("-" + extra);
+                }
+
+                builder.AppendLine();
             }
 
-            return builder.ToString();
+            foreach (string project in result.LooseProjects)
+            {
+                builder.AppendLine(project);
+            }
+
+            return builder.ToString().TrimEnd() + Environment.NewLine;
         });
     }
 
