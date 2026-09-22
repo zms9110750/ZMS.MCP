@@ -58,11 +58,12 @@ public static class SolutionExplorer
 
     /// <summary>
     /// 扫盘并按解决方案分组：
-    /// 每个解决方案列出它描述的项目，再列出"客观在它所在文件夹下、却没被它描述"的项目；
-    /// 没被任何解决方案描述（也没落在某个解决方案文件夹下）的项目作为散装项目返回。
+    /// 每个解决方案列出它描述的项目，再列出"客观在它所在文件夹下、却没被任何解决方案描述"的项目；
+    /// 既没被描述、也不落在任何解决方案文件夹下的项目作为散装项目返回。
+    /// 项目只归给包含它的、目录最深（最贴近）的那个解决方案。
     /// </summary>
     /// <param name="folder">扫描根目录。</param>
-    /// <param name="depth">递归深度（小于等于 0 时按 4）。</param>
+    /// <param name="depth">递归深度（小于等于 0 时按 4）；描述的项目不受此限制。</param>
     /// <param name="kinds">要包含的类型，逗号分隔：sln,slnx,csproj；空 = 全部。</param>
     public static ScanResult ScanTree(string folder, int depth, string kinds)
     {
@@ -79,70 +80,117 @@ public static class SolutionExplorer
 
         HashSet<string> extensions = ParseKinds(kinds);
         List<string> scanned = EnumerateFiles(root, depth, extensions);
-
-        List<string> solutions = scanned
-            .Where(file => Path.GetExtension(file).ToLowerInvariant() is ".sln" or ".slnx")
-            .OrderBy(file => file, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
+        List<string> solutions = CollectSolutions(scanned);
         List<string> projectFiles = scanned
             .Where(file => string.Equals(Path.GetExtension(file), ".csproj", StringComparison.OrdinalIgnoreCase))
             .ToList();
 
-        HashSet<string> claimed = new(StringComparer.OrdinalIgnoreCase);
+        // 每个解决方案描述的项目；被任何解决方案描述过的项目都不再算"额外关系"或"散装"
+        Dictionary<string, IReadOnlyList<SolutionProject>> describedBySolution = new(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> describedAnywhere = new(StringComparer.OrdinalIgnoreCase);
+        foreach (string solution in solutions)
+        {
+            IReadOnlyList<SolutionProject> described = ReadProjectsSafe(solution);
+            describedBySolution[solution] = described;
+            foreach (SolutionProject project in described)
+            {
+                describedAnywhere.Add(project.AbsolutePath);
+            }
+        }
+
+        // 项目归属：包含它的、目录最深的那个解决方案
+        Dictionary<string, string> owner = new(StringComparer.OrdinalIgnoreCase);
+        foreach (string project in projectFiles)
+        {
+            string? best = null;
+            int bestLength = -1;
+            foreach (string solution in solutions)
+            {
+                string? directory = Path.GetDirectoryName(solution);
+                if (directory == null || !IsUnder(directory, project))
+                {
+                    continue;
+                }
+
+                if (directory.Length > bestLength)
+                {
+                    best = solution;
+                    bestLength = directory.Length;
+                }
+            }
+
+            if (best != null)
+            {
+                owner[project] = best;
+            }
+        }
+
         List<ScanSolutionGroup> groups = [];
         foreach (string solution in solutions)
         {
-            IReadOnlyList<SolutionProject> described;
-            try
-            {
-                described = ReadProjects(solution);
-            }
-            catch (Exception)
-            {
-                // 坏掉的解决方案文件不阻塞扫描，当作没描述任何项目
-                described = [];
-            }
+            List<string> describedPaths = describedBySolution[solution]
+                .Select(project => Describe(root, project.AbsolutePath))
+                .ToList();
 
-            string? solutionDirectory = Path.GetDirectoryName(solution);
-            List<string> describedPaths = [];
-            foreach (SolutionProject project in described)
-            {
-                describedPaths.Add(Describe(root, project.AbsolutePath));
-                claimed.Add(project.AbsolutePath);
-            }
-
-            List<string> extra = [];
-            if (solutionDirectory != null)
-            {
-                foreach (string project in projectFiles)
-                {
-                    if (!IsUnder(solutionDirectory, project))
-                    {
-                        continue;
-                    }
-
-                    // 落在解决方案文件夹下的项目（含被描述的）都不再算散装
-                    claimed.Add(project);
-                    bool alreadyDescribed = described.Any(
-                        entry => string.Equals(entry.AbsolutePath, project, StringComparison.OrdinalIgnoreCase));
-                    if (!alreadyDescribed)
-                    {
-                        extra.Add(Describe(root, project));
-                    }
-                }
-            }
+            List<string> extra = projectFiles
+                .Where(project => owner.TryGetValue(project, out string? ownerSolution) && ownerSolution == solution)
+                .Where(project => !describedAnywhere.Contains(project))
+                .Select(project => Describe(root, project))
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .ToList();
 
             groups.Add(new ScanSolutionGroup(Describe(root, solution), describedPaths, extra));
         }
 
         List<string> loose = projectFiles
-            .Where(project => !claimed.Contains(project))
+            .Where(project => !describedAnywhere.Contains(project) && !owner.ContainsKey(project))
             .Select(project => Describe(root, project))
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
         return new ScanResult(groups, loose);
+    }
+
+    /// <summary>找出解决方案文件；同一目录同名时 .slnx 优先于 .sln（只算一个解决方案）。</summary>
+    private static List<string> CollectSolutions(List<string> scanned)
+    {
+        Dictionary<string, string> byKey = new(StringComparer.OrdinalIgnoreCase);
+        foreach (string file in scanned)
+        {
+            string extension = Path.GetExtension(file).ToLowerInvariant();
+            if (extension is not ".sln" and not ".slnx")
+            {
+                continue;
+            }
+
+            string directory = Path.GetDirectoryName(file) ?? "";
+            string key = Path.Combine(directory, Path.GetFileNameWithoutExtension(file));
+            if (!byKey.TryGetValue(key, out string? existing))
+            {
+                byKey[key] = file;
+                continue;
+            }
+
+            if (Path.GetExtension(existing).ToLowerInvariant() == ".sln" && extension == ".slnx")
+            {
+                byKey[key] = file;
+            }
+        }
+
+        return byKey.Values.OrderBy(file => file, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private static IReadOnlyList<SolutionProject> ReadProjectsSafe(string solutionPath)
+    {
+        try
+        {
+            return ReadProjects(solutionPath);
+        }
+        catch (Exception)
+        {
+            // 坏掉的解决方案文件不阻塞扫描，当作没描述任何项目
+            return [];
+        }
     }
 
     /// <summary>相对扫描根描述路径；在扫描根之外时照实给绝对路径（正斜杠）。</summary>
@@ -157,9 +205,17 @@ public static class SolutionExplorer
         return relative.Replace('\\', '/');
     }
 
-    private static bool IsUnder(string directory, string file)
+    /// <summary>
+    /// <paramref name="file"/> 是否在 <paramref name="directory"/> 之下（含多级）。
+    /// 前缀末尾保证有且只有一个分隔符 —— 盘根（<c>C:\</c>）本身已带分隔符，
+    /// 不能再拼一个（<c>TrimEndingDirectorySeparator</c> 对盘根是保留而不是去掉）。
+    /// </summary>
+    internal static bool IsUnder(string directory, string file)
     {
-        string prefix = Path.GetFullPath(directory) + Path.DirectorySeparatorChar;
+        string normalized = Path.GetFullPath(directory);
+        string prefix = normalized.EndsWith(Path.DirectorySeparatorChar)
+            ? normalized
+            : normalized + Path.DirectorySeparatorChar;
         return Path.GetFullPath(file).StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -208,7 +264,7 @@ public static class SolutionExplorer
             foreach (string subdirectory in subdirectories)
             {
                 string name = Path.GetFileName(subdirectory);
-                if (name is "bin" or "obj" or ".git" or ".vs" or "node_modules")
+                if (IsSkippedDirectory(name))
                 {
                     continue;
                 }
@@ -218,6 +274,16 @@ public static class SolutionExplorer
         }
 
         return results;
+    }
+
+    /// <summary>构建输出与工具目录：不区分大小写（Windows 上 Bin / OBJ 也要跳过）。</summary>
+    private static bool IsSkippedDirectory(string name)
+    {
+        return name.Equals("bin", StringComparison.OrdinalIgnoreCase) ||
+               name.Equals("obj", StringComparison.OrdinalIgnoreCase) ||
+               name.Equals(".git", StringComparison.OrdinalIgnoreCase) ||
+               name.Equals(".vs", StringComparison.OrdinalIgnoreCase) ||
+               name.Equals("node_modules", StringComparison.OrdinalIgnoreCase);
     }
 
     public static IReadOnlyList<SolutionProject> ReadProjects(string solutionPath)
