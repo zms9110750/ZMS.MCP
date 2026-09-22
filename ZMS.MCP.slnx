@@ -5,5 +5,6 @@
   </Folder>
   <Folder Name="/test/">
     <Project Path="test/ZMS.MCP.Test/ZMS.MCP.Test.csproj" />
+    <Project Path="test/ZMS.MCP.Csharp.Test/ZMS.MCP.Csharp.Test.csproj" />
   </Folder>
 </Solution>
