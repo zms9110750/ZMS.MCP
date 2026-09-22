@@ -5,8 +5,7 @@ namespace zms9110750.ZMS_MCP.Cli.Tools;
 
 /// <summary>
 /// 统一资源访问工具：按 uri 的 scheme 分发到对应协议处理器。
-/// 支持协议：http/https、webdav（本地文件/目录/压缩容器，file@/dir@/archive@ 断言）、
-/// ftp、structured（json/xml/yaml/ini/toml/csharp）、sqlite、cmd（白名单命令）、nuget。
+/// 支持协议：http/https、webdav（本地文件/目录/压缩容器）、ftp、cmd（白名单命令）、nuget。
 /// </summary>
 [McpServerToolType]
 public static partial class UriResourceTools
@@ -20,7 +19,6 @@ public static partial class UriResourceTools
         ["https"] = new HttpProtocol(),
         ["webdav"] = new WebDavProtocol(),
         ["ftp"] = new FtpProtocol(),
-        ["structured"] = new StructuredProtocol(),
         ["cmd"] = new CmdProtocol(),
         ["nuget"] = new NuGetProtocol(),
     };
@@ -37,14 +35,12 @@ public static partial class UriResourceTools
         "统一资源访问工具。uri 格式: scheme://[userinfo@]host[:port]/path?query#fragment。\n" +
         "action 为 HTTP 方法枚举（GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS/TRACE/CONNECT/QUERY 及 WebDAV 的 PROPFIND/MKCOL/MOVE/COPY/LOCK/UNLOCK；cmd 协议固定 POST）。\n" +
         "head 为 JSON 对象字符串请求头；body 为请求体/内容/参数（自由文本参数一律放 body，避免 ?#% 空格转义地狱）。\n" +
-        "支持协议: http/https（网页/API，fragment=下载路径）、webdav（本地文件/目录/压缩容器/SQLite，userinfo 断言 file@/dir@/archive@/sqlite@，\n" +
-        "  file@ 的 #=文件内文本搜索（正则+行号），dir@ 的 #=文件名搜索（GetFiles pattern），sqlite@ 的 #=SQL 查询/表名）、\n" +
-        "ftp（远程 FTP，默认匿名）、structured（json/xml/yaml/ini/toml/csharp 文档，#=定位路径；host=cache/nuget）、\n" +
-        "cmd（白名单命令，命令树在 path，参数在 body，固定 POST）。\n" +
+        "支持协议: http/https（网页/API，fragment=下载路径）、webdav（本地文件/目录/压缩容器，userinfo 断言 file@/dir@/archive@/json@/xml@/yaml@/toml@/ini@/csharp@）、\n" +
+        "ftp（远程 FTP，默认匿名）、cmd（白名单命令，命令树在 path，参数在 body，固定 POST）、nuget（本地包缓存 API 文档）。\n" +
         "query 全选填：文件读取用 line/offset/max；目录列出用 depth/limit/meta；结构化文档用 depth/max。\n" +
         "破坏性操作（DELETE/写/命令）统一走 cookie 两阶段确认：先返回影响清单+cookie，带 cookie 且清单未变才执行。")]
     public static async Task<string> UriResource(
-        [Description("目标 URI，如 https://example.com/a?b=1、webdav://file@/C:/data.txt、ftp://user:pass@host/dir、structured://json@/C:/a.json#$.a.b、nuget://fusioncache@last/")] string uri,
+        [Description("目标 URI，如 https://example.com/a?b=1、webdav://file@/C:/data.txt、ftp://user:pass@host/dir、nuget://Newtonsoft.Json/Newtonsoft.Json.Linq")] string uri,
         [Description("HTTP 方法，如 GET / POST / PUT / DELETE / PROPFIND / MOVE / MKCOL")] string action,
         [Description("请求头，JSON 对象字符串，如 {\"Content-Type\":\"application/json\"}")] string? head = null,
         [Description("请求体/内容/目标路径，按协议和 action 使用")] string? body = null)

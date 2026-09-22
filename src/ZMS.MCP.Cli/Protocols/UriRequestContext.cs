@@ -8,17 +8,16 @@ namespace zms9110750.ZMS_MCP.Cli.Protocols;
 /// </summary>
 public sealed class UriRequestContext
 {
-    /// <summary>协议 scheme（小写），如 http / webdav / ftp / structured / sqlite / cmd / nuget。</summary>
+    /// <summary>协议 scheme（小写）。</summary>
     public required string Scheme { get; init; }
 
     /// <summary>
     /// userinfo 段（@ 前的内容，小写）。各协议自定义语义：
-    /// http/ftp = 账号[:密码]；webdav = 类型断言（file@/dir@/archive@）；
-    /// structured = 格式断言（json@/xml@/yaml@/ini@/toml@/csharp@）；nuget = 包名。
+    /// http/ftp = 账号[:密码]；webdav = 类型断言；nuget = 包名。
     /// </summary>
     public string? UserInfo { get; init; }
 
-    /// <summary>host 段。本地协议（webdav/structured/sqlite）为空；ftp 必填；http 为主机名；cmd 为程序名（PATH 查找）。</summary>
+    /// <summary>host 段。各协议自定义语义（http 主机名 / ftp 主机名 / cmd 程序名 / nuget 包名）。</summary>
     public string? Host { get; init; }
 
     /// <summary>端口。缺省时各协议按 scheme 默认（http=80/https=443/ftp=21）。</summary>
@@ -30,7 +29,7 @@ public sealed class UriRequestContext
     /// <summary>query 段解析结果（已解码，key 小写）。全选填，各协议给默认值。</summary>
     public Dictionary<string, string> Query { get; init; } = [];
 
-    /// <summary>fragment 段（解码后）。各协议自定义：http=下载路径；webdav file@=文件内文本搜索、dir@=文件名搜索、archive@=容器内路径；structured=定位路径；sqlite=#sql:查询或表名；cmd 不用（并入 body）。</summary>
+    /// <summary>fragment 段（解码后）。各协议自定义：http=下载路径；webdav file@=文件内文本搜索、dir@=文件名搜索、archive@=容器内路径；structured=定位路径；cmd 不用（并入 body）。</summary>
     public string? Fragment { get; init; }
 
     /// <summary>HTTP 方法（原样，如 GET / PUT / PROPFIND / MOVE）。cmd 协议固定 POST（命令只有一个作用）。</summary>

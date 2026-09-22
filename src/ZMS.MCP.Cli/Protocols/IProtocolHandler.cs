@@ -1,14 +1,13 @@
 namespace zms9110750.ZMS_MCP.Cli.Protocols;
 
 /// <summary>
-/// 协议处理器接口。每个协议（http/webdav/ftp/structured/sqlite/cmd/nuget）实现一个，
+/// 协议处理器接口。每个协议实现一个，
 /// 由 <see cref="UriResourceTools"/> 按 uri 的 scheme 从字典中取出并分发调用。
 /// </summary>
 public interface IProtocolHandler
 {
     /// <summary>
-    /// 本处理器负责的 scheme（小写），如 "http"、"webdav"、"ftp"、"structured"、"sqlite"、"cmd"、"nuget"。
-    /// 同时作为字典分发的 key。
+    /// 本处理器负责的 scheme（小写），同时作为字典分发的 key。
     /// </summary>
     string Scheme { get; }
 

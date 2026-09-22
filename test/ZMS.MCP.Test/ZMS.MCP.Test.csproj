@@ -5,8 +5,7 @@
     <OutputType>Exe</OutputType>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <Description>Auto-generated test project</Description>
-    <DefineConstants>$(DefineConstants);IS_TEST</DefineConstants>
+    <Description>ZMS.MCP 单元测试</Description>
   </PropertyGroup>
 
   <ItemGroup>
@@ -16,14 +15,8 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
   </ItemGroup>
 
-  <ItemGroup Condition="'$(IsLib)' == 'true'">
-    <ProjectReference Include="..\..\src\ZMS.MCP\ZMS.MCP.csproj" />
-  </ItemGroup>
-  <ItemGroup Condition="'$(IsLib)' != 'true' And '$(IsCli)' == 'true'">
+  <ItemGroup>
     <ProjectReference Include="..\..\src\ZMS.MCP.Cli\ZMS.MCP.Cli.csproj" />
-  </ItemGroup>
-  <ItemGroup Condition="'$(IsLib)' != 'true' And '$(IsGui)' == 'true'">
-    <ProjectReference Include="..\..\src\ZMS.MCP.GUI\ZMS.MCP.GUI.csproj" />
   </ItemGroup>
 
 </Project>

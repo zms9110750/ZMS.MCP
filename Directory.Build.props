@@ -1,30 +1,6 @@
 ﻿<Project>
-  <!-- ===== 模板符号 → MSBuild 属性 ===== -->
-  <PropertyGroup>
-    <IsLib>False</IsLib>
-    <IsCli>True</IsCli>
-    <IsGui>False</IsGui>
-    <IsTest>True</IsTest>
-    <UsePolly>False</UsePolly>
-    <UseFusionCache>False</UseFusionCache>
-    <UseDI>True</UseDI>
-    <UseLog>False</UseLog>
-  </PropertyGroup>
 
-  <!-- ===== 编译常量（编译时由 bool 属性驱动） ===== -->
-  <PropertyGroup Condition="'$(UsePolly)' == 'true'">
-    <DefineConstants>$(DefineConstants);USE_POLLY</DefineConstants>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(UseFusionCache)' == 'true'">
-    <DefineConstants>$(DefineConstants);USE_FUSIONCACHE</DefineConstants>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(UseDI)' == 'true'">
-    <DefineConstants>$(DefineConstants);USE_DI</DefineConstants>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(UseLog)' == 'true'">
-    <DefineConstants>$(DefineConstants);USE_LOG</DefineConstants>
-  </PropertyGroup>
-
+  <!-- ===== 项目通用元数据 ===== -->
   <PropertyGroup>
     <Authors>zms9110750</Authors>
     <Version>0.1.0-a.0</Version>
@@ -39,66 +15,19 @@
     <AssemblyName>$(RootNamespace)</AssemblyName>
   </PropertyGroup>
 
-  <!-- ===== InternalsVisibleTo：暴露给测试项目 ===== -->
-  <ItemGroup Condition="'$(IsTest)' == 'true'">
+  <!-- ===== InternalsVisibleTo：向同名测试项目开放 internal ===== -->
+  <ItemGroup>
     <InternalsVisibleTo Include="$(AssemblyName).Test" />
   </ItemGroup>
 
-  <!-- ===== 条件包引用 ===== -->
-  <!-- 通用：不管 DI 与否，只要开就加 -->
-  <ItemGroup Condition="'$(UseFusionCache)' == 'true'">
-    <PackageReference Include="ZiggyCreatures.FusionCache.Serialization.SystemTextJson" Version="2.6.0" />
-    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="3.53.3" />
-  </ItemGroup>
-  <ItemGroup Condition="'$(UseLog)' == 'true'">
-    <PackageReference Include="Serilog" Version="4.4.0" />
-    <PackageReference Include="Serilog.Sinks.Console" Version="6.1.1" />
-    <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
+  <!-- ===== MCP 包（所有项目都需要） ===== -->
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol" Version="2.2.0" />
   </ItemGroup>
 
-  <!-- 按 DI 分组 -->
-  <Choose>
-    <When Condition="'$(UseDI)' == 'true'">
-      <ItemGroup Condition="'$(UseFusionCache)' != 'true' And '$(UsePolly)' != 'true' And '$(UseLog)' != 'true'">
-        <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.11" />
-      </ItemGroup>
-      <ItemGroup Condition="'$(UseFusionCache)' == 'true'">
-        <PackageReference Include="NeoSmart.Caching.Sqlite.AspNetCore" Version="9.0.1" />
-      </ItemGroup>
-      <ItemGroup Condition="'$(UsePolly)' == 'true' And '$(UseFusionCache)' == 'true'">
-        <PackageReference Include="Axion.Extensions.Http.Resilience.Caching.Hybrid" Version="10.4.0" />
-      </ItemGroup>
-      <ItemGroup Condition="'$(UsePolly)' == 'true' And '$(UseFusionCache)' != 'true'">
-        <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="10.8.0" />
-      </ItemGroup>
-      <ItemGroup Condition="'$(UseLog)' == 'true'">
-        <PackageReference Include="Serilog.Extensions.Logging" Version="10.0.0" />
-        <PackageReference Include="Serilog.Extensions.Hosting" Version="10.0.0" />
-        <PackageReference Include="Soenneker.HttpClients.LoggingHandler" Version="4.0.191" />
-      </ItemGroup>
-    </When>
-    <Otherwise>
-      <ItemGroup Condition="'$(UseFusionCache)' == 'true'">
-        <PackageReference Include="NeoSmart.Caching.Sqlite" Version="9.0.1" />
-      </ItemGroup>
-      <ItemGroup Condition="'$(UsePolly)' == 'true' And '$(UseFusionCache)' == 'true'">
-        <PackageReference Include="Axion.Extensions.Polly.Caching.Hybrid" Version="10.4.0" />
-      </ItemGroup>
-      <ItemGroup Condition="'$(UsePolly)' == 'true' And '$(UseFusionCache)' != 'true'">
-        <PackageReference Include="Polly.Core" Version="8.7.0" />
-      </ItemGroup>
-    </Otherwise>
-  </Choose>
-
-  <!-- 编译前格式化（仅当 .editorconfig 存在时执行） -->
-  <Target Name="FormatCode" BeforeTargets="BeforeBuild"
-          Condition="Exists('$(MSBuildThisFileDirectory).editorconfig')">
-    <Exec Command="dotnet format --no-restore"
-          WorkingDirectory="$(MSBuildThisFileDirectory)" />
-  </Target>
-
-  <!-- ===== 全局 Global.cs（所有项目共享） ===== -->
+  <!-- ===== 全局 Global.cs（所有项目共享：MCP global using + 通用入口） ===== -->
   <ItemGroup>
     <Compile Include="$(MSBuildThisFileDirectory)Global.cs" />
   </ItemGroup>
+
 </Project>
