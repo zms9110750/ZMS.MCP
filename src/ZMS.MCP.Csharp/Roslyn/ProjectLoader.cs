@@ -10,7 +10,7 @@ namespace ZMS.MCP.Csharp.Roslyn;
 
 /// <summary>
 /// .csproj 的静态快照：目标框架、源文件、项目引用与包引用。
-/// 只做 XML 解析，不启动 MSBuild。
+/// 只做 XML 解析，不启动 MSBuild —— 它是评估失败时的降级依据。
 /// </summary>
 public sealed class ProjectFileInfo
 {
@@ -270,8 +270,18 @@ public sealed class ProjectFileInfo
     }
 }
 
+/// <summary>项目加载方式。</summary>
+public enum LoadMode
+{
+    /// <summary>走 MSBuild 评估：编译项、引用集、宏都来自真实评估结果。</summary>
+    Evaluated,
+
+    /// <summary>降级：只解析 csproj 并扫目录，引用只有宿主运行时程序集，诊断可能夹带假错误。</summary>
+    Fallback,
+}
+
 /// <summary>
-/// 已加载的项目：.csproj 快照 + 由源文件构建出的 <see cref="CSharpCompilation"/>。
+/// 已加载的项目：csproj 快照 + 由源文件构建出的 <see cref="CSharpCompilation"/>。
 /// </summary>
 public sealed class LoadedProject
 {
@@ -279,21 +289,100 @@ public sealed class LoadedProject
 
     public ProjectFileInfo Info { get; }
 
+    /// <summary>由项目源文件构建出的编译对象。</summary>
     public CSharpCompilation Compilation { get; }
 
-    private LoadedProject(ProjectFileInfo info, CSharpCompilation compilation)
+    /// <summary>本次加载走的是评估还是降级。</summary>
+    public LoadMode Mode { get; }
+
+    /// <summary>降级原因（<see cref="LoadMode.Evaluated"/> 时为空）。</summary>
+    public string FallbackReason { get; }
+
+    private LoadedProject(ProjectFileInfo info, CSharpCompilation compilation, LoadMode mode, string fallbackReason)
     {
         Info = info;
         Compilation = compilation;
+        Mode = mode;
+        FallbackReason = fallbackReason;
     }
 
+    /// <summary>
+    /// 加载项目：先问 MSBuild 要"项目的事实"（编译项 / 引用集 / 宏 / 语言选项），拿不到就降级。
+    /// 降级时 <see cref="Mode"/> 为 <see cref="LoadMode.Fallback"/>，调用方应把
+    /// "简化模式，可能有假错误" 一并告诉使用者。
+    /// </summary>
     public static LoadedProject Load(string projectPath)
     {
         ProjectFileInfo info = ProjectFileInfo.Read(projectPath);
-        CSharpParseOptions parseOptions = new(LanguageVersion.Preview);
-        List<SyntaxTree> trees = [];
-        foreach (string file in info.SourceFiles)
+        try
         {
+            MsBuildEvaluation evaluation = MsBuildEvaluator.Evaluate(info.ProjectPath);
+            return Evaluated(info, evaluation);
+        }
+        catch (Exception exception)
+        {
+            return Fallback(info, exception.Message);
+        }
+    }
+
+    private static LoadedProject Evaluated(ProjectFileInfo info, MsBuildEvaluation evaluation)
+    {
+        CSharpParseOptions parseOptions = new(
+            languageVersion: ParseLanguageVersion(evaluation.GetProperty("LangVersion")),
+            preprocessorSymbols: SplitSymbols(evaluation.GetProperty("DefineConstants")));
+
+        List<SyntaxTree> trees = ParseTrees(evaluation.CompileItems, parseOptions);
+
+        string assemblyName = evaluation.GetProperty("AssemblyName");
+        if (string.IsNullOrWhiteSpace(assemblyName))
+        {
+            assemblyName = Path.GetFileNameWithoutExtension(info.ProjectPath);
+        }
+
+        CSharpCompilationOptions options = new(
+            outputKind: OutputKind.DynamicallyLinkedLibrary,
+            allowUnsafe: true,
+            nullableContextOptions: ParseNullable(evaluation.GetProperty("Nullable")));
+
+        CSharpCompilation compilation = CSharpCompilation.Create(
+            assemblyName,
+            trees,
+            References(evaluation.ReferencePaths),
+            options);
+
+        return new LoadedProject(info, compilation, LoadMode.Evaluated, "");
+    }
+
+    private static LoadedProject Fallback(ProjectFileInfo info, string reason)
+    {
+        CSharpParseOptions parseOptions = new(LanguageVersion.Preview);
+        List<SyntaxTree> trees = ParseTrees(info.SourceFiles, parseOptions);
+
+        CSharpCompilationOptions options = new(
+            outputKind: OutputKind.DynamicallyLinkedLibrary,
+            allowUnsafe: true,
+            nullableContextOptions: NullableContextOptions.Enable);
+
+        CSharpCompilation compilation = CSharpCompilation.Create(
+            Path.GetFileNameWithoutExtension(info.ProjectPath),
+            trees,
+            RuntimeReferences(),
+            options);
+
+        return new LoadedProject(info, compilation, LoadMode.Fallback, reason);
+    }
+
+    private static List<SyntaxTree> ParseTrees(IEnumerable<string> files, CSharpParseOptions parseOptions)
+    {
+        List<SyntaxTree> trees = [];
+        HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
+        foreach (string file in files)
+        {
+            if (string.IsNullOrWhiteSpace(file) || !seen.Add(file) || !File.Exists(file))
+            {
+                continue;
+            }
+
             string text;
             try
             {
@@ -308,18 +397,55 @@ public sealed class LoadedProject
             trees.Add(CSharpSyntaxTree.ParseText(source, parseOptions, path: file));
         }
 
-        CSharpCompilationOptions options = new(
-            outputKind: OutputKind.DynamicallyLinkedLibrary,
-            allowUnsafe: true,
-            nullableContextOptions: NullableContextOptions.Enable);
+        return trees;
+    }
 
-        CSharpCompilation compilation = CSharpCompilation.Create(
-            Path.GetFileNameWithoutExtension(info.ProjectPath),
-            trees,
-            RuntimeReferences(),
-            options);
+    private static IEnumerable<MetadataReference> References(IEnumerable<string> paths)
+    {
+        HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
+        foreach (string path in paths)
+        {
+            if (string.IsNullOrWhiteSpace(path) || !seen.Add(path) || !File.Exists(path))
+            {
+                continue;
+            }
 
-        return new LoadedProject(info, compilation);
+            MetadataReference? reference = GetReference(path);
+            if (reference != null)
+            {
+                yield return reference;
+            }
+        }
+    }
+
+    private static LanguageVersion ParseLanguageVersion(string value)
+    {
+        return LanguageVersionFacts.TryParse(value, out LanguageVersion version) ? version : LanguageVersion.Preview;
+    }
+
+    private static NullableContextOptions ParseNullable(string value)
+    {
+        if (string.Equals(value, "disable", StringComparison.OrdinalIgnoreCase))
+        {
+            return NullableContextOptions.Disable;
+        }
+
+        if (string.Equals(value, "warnings", StringComparison.OrdinalIgnoreCase))
+        {
+            return NullableContextOptions.Warnings;
+        }
+
+        if (string.Equals(value, "annotations", StringComparison.OrdinalIgnoreCase))
+        {
+            return NullableContextOptions.Annotations;
+        }
+
+        return NullableContextOptions.Enable;
+    }
+
+    private static string[] SplitSymbols(string value)
+    {
+        return value.Split([';', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
 
     private static IEnumerable<MetadataReference> RuntimeReferences()

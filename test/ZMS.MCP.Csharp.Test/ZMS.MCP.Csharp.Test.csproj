@@ -6,6 +6,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <Description>ZMS.MCP.Csharp 单元测试</Description>
+    <!-- xUnit1051 建议给"接受 CancellationToken 的方法"传 token，但本项目的工具 API 是同步设计（MCP 工具方法不带 token） -->
+    <NoWarn>$(NoWarn);xUnit1051</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
