@@ -242,12 +242,16 @@ public sealed class SymbolQueryTests
 
         Assert.Contains("## ZMS.MCP.Csharp.Roslyn", output);
         Assert.Contains("- `class LoadedProject`", output);
-        // 只要类型时不该出现成员行（成员行以两个空格缩进 + 反引号开头）
-        Assert.DoesNotContain("\n  - `", output);
+        // 只要类型时不列成员（按种类标记判断；嵌套类型也会缩进，所以不能用缩进判断）
+        Assert.DoesNotContain("` (method)", output);
+        Assert.DoesNotContain("` (property)", output);
+        // 嵌套类型按层级缩进（MsBuildEvaluator.CacheEntry 这类）
+        Assert.Contains("\n  - `class ", output);
 
-        // 列成员时：成员行必须是两格缩进（正向断言，不只看"没出现"）
+        // 列成员时：成员行两格缩进（正向断言，不只看"没出现"）
         string withMembers = SymbolTools.ListSymbols(SelfProjectPath(), "M", "", "");
         Assert.Contains("\n  - `", withMembers);
+        Assert.Contains("` (method)", withMembers);
     }
 
     [Fact]

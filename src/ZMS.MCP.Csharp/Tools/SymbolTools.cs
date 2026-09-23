@@ -17,7 +17,7 @@ public static class SymbolTools
     [Description(
         "List symbols declared in the project's own source (referenced assemblies are excluded). " +
         "kind = letters from NCSIPFEMD (N namespace, C class, S struct, I interface, P property, F field, E event, M method); " +
-        "T = the three type kinds together; empty = all. " +
+        "T = the three type kinds together; D = only symbols carrying an XML doc comment; empty = all. " +
         "modifiers = comma separated 公开/程序集/保护/私有/静态/常量/抽象/只读/虚/覆写 (English also accepted); every given condition must match. " +
         "argumentTypes = comma separated parameter types; when set, only methods with exactly those parameter types are listed.")]
     public static string ListSymbols(
@@ -48,6 +48,7 @@ public static class SymbolTools
                 // 别静默吞掉拼错的字母 —— 否则"筛出来是空的"看起来就像"项目里没符号"
                 builder.AppendLine($"⚠ 无法识别的 kind 字母已忽略：{string.Join(", ", unknownKindLetters)}（可用：N C S I T P F E M D）");
             }
+
             if (entries.Count == 0)
             {
                 builder.AppendLine();
@@ -65,15 +66,11 @@ public static class SymbolTools
                     builder.AppendLine($"## {(currentNamespace.Length == 0 ? "(global)" : currentNamespace)}");
                 }
 
-                if (entry.IsType)
-                {
-                    builder.AppendLine($"- `{entry.Signature}` ({entry.Kind}){Location(project, entry.Symbol)}");
-                    continue;
-                }
-
-                // 成员固定缩进一层（即使这次没列类型也保持稳定），并标注所属类型
+                // 缩进按所属层级的深度走：顶层 0，外层类型的成员与嵌套类型 1，嵌套类型的成员 2 …
+                int depth = entry.Container.Length == 0 ? 0 : entry.Container.Split('.').Length;
+                string indent = new string(' ', depth * 2);
                 string container = entry.Container.Length == 0 ? "" : $" [{entry.Container}]";
-                builder.AppendLine($"  - `{entry.Signature}` ({entry.Kind}){container}{Location(project, entry.Symbol)}");
+                builder.AppendLine($"{indent}- `{entry.Signature}` ({entry.Kind}){container}{Location(project, entry.Symbol)}");
             }
 
             return builder.ToString();

@@ -281,10 +281,11 @@ public static class SymbolQuery
         List<SymbolEntry> entries = [];
         CollectNamespace(compilation.Assembly.GlobalNamespace, entries, filter);
 
+        // Container 升序：先顶层类型，再它的成员，再嵌套类型，再嵌套类型的成员…
+        // 与源码层级一致（同层按行号）
         return entries
             .OrderBy(entry => entry.Namespace, StringComparer.Ordinal)
             .ThenBy(entry => entry.Container, StringComparer.Ordinal)
-            .ThenBy(entry => entry.IsType ? 0 : 1)
             .ThenBy(entry => entry.Line)
             .ToList();
     }
