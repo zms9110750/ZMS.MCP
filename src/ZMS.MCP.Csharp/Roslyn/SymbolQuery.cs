@@ -6,8 +6,11 @@ namespace ZMS.MCP.Csharp.Roslyn;
 /// 符号种类。字母取自需求文档的 <c>NCSIPFEMD</c>：
 /// N 命名空间、C 类型（class）、S 结构、I 接口、P 属性、F 字段、E 事件、M 方法、D 文档注释。
 ///
-/// 说明：文档写的是 <c>NCSIPFED</c>（没有 M）；方法显然要能列，这里补上 M。
-/// 另外文档注释那边的 <c>T</c>（类型）在这里展开成 C|S|I（源码能分辨 class/struct/interface）。
+/// 说明：
+/// - 文档写的是 <c>NCSIPFED</c>（没有 M）；方法显然要能列，这里补上 M。
+/// - 文档注释那边的 <c>T</c>（类型）在这里展开成 C|S|I（源码能分辨 class/struct/interface）。
+/// - <c>D</c> 不是一种"种类"，而是过滤开关：给了它就只列**带 XML 文档注释**的符号；
+///   只给 D（不给别的字母）时按"所有种类"处理。
 /// </summary>
 [Flags]
 public enum SymbolKinds
@@ -25,7 +28,10 @@ public enum SymbolKinds
     All = Namespace | Class | Struct | Interface | Property | Field | Event | Method,
 }
 
-/// <summary>修饰符过滤（同一维度内取或，不同维度之间取且）。</summary>
+/// <summary>
+/// 修饰符过滤：**所有给定条件都要满足**（AND）。
+/// 注意可访问性是互斥的，所以同时给「公开,私有」会得到空集 —— 这是刻意的，不做"取或"猜测。
+/// </summary>
 [Flags]
 public enum SymbolModifiers
 {
@@ -56,7 +62,7 @@ public sealed class SymbolEntry
     /// <summary>所属类型（点分，含嵌套类型；命名空间级符号为空串）。</summary>
     public string Container { get; }
 
-    /// <summary>显示用签名（含修饰符、类型、参数）。</summary>
+    /// <summary>显示用签名（含修饰符、类型、参数、可空标注）。</summary>
     public string Signature { get; }
 
     public string FilePath { get; }
@@ -89,6 +95,8 @@ public sealed class SymbolEntry
 /// <summary>把需求文档里的字符串写法解析成过滤条件。</summary>
 public static class SymbolFilterParser
 {
+    private const string KnownKindLetters = "NCSITPFEMD";
+
     /// <summary>解析 <c>NCSIPFEMD</c> 这样的字母串（大小写不敏感，非法字母忽略）。</summary>
     public static SymbolKinds ParseKinds(string value)
     {
@@ -132,6 +140,27 @@ public static class SymbolFilterParser
         }
 
         return kinds;
+    }
+
+    /// <summary>
+    /// 返回 kind 串里无法识别的字母（去重，忽略空白）。
+    /// 调用方据此提醒使用者，而不是静默忽略 —— 否则"拼错的字母"看起来就像"筛出来是空的"。
+    /// </summary>
+    public static IReadOnlyList<char> UnknownKindLetters(string value)
+    {
+        List<char> unknown = [];
+        foreach (char raw in value)
+        {
+            char upper = char.ToUpperInvariant(raw);
+            if (char.IsWhiteSpace(upper) || KnownKindLetters.Contains(upper) || unknown.Contains(upper))
+            {
+                continue;
+            }
+
+            unknown.Add(upper);
+        }
+
+        return unknown;
     }
 
     /// <summary>解析修饰符词（中文或英文），无法识别的词忽略。</summary>
@@ -206,7 +235,7 @@ public static class SymbolFilterParser
 }
 
 /// <summary>
-/// 列出项目源码里声明的符号（不含引用的程序集），支持按种类、修饰符、方法参数过滤。
+/// 列出项目源码里声明的符号（不含引用的程序集），支持按种类、修饰符、方法参数、是否有文档注释过滤。
 /// </summary>
 public static class SymbolQuery
 {
@@ -223,7 +252,16 @@ public static class SymbolQuery
             | SymbolDisplayParameterOptions.IncludeParamsRefOut
             | SymbolDisplayParameterOptions.IncludeDefaultValue,
         propertyStyle: SymbolDisplayPropertyStyle.ShowReadWriteDescriptor,
-        miscellaneousOptions: SymbolDisplayMiscellaneousOptions.UseSpecialTypes);
+        miscellaneousOptions: SymbolDisplayMiscellaneousOptions.UseSpecialTypes
+            // 保留 string? 这类可空标注，否则签名看不到可空性
+            | SymbolDisplayMiscellaneousOptions.IncludeNullableReferenceTypeModifier);
+
+    /// <summary>一次查询的过滤条件。</summary>
+    private sealed record QueryFilter(
+        SymbolKinds Kinds,
+        SymbolModifiers Modifiers,
+        IReadOnlyList<string> ArgumentTypes,
+        bool DocumentedOnly);
 
     public static IReadOnlyList<SymbolEntry> List(
         Compilation compilation,
@@ -231,13 +269,17 @@ public static class SymbolQuery
         SymbolModifiers modifiers,
         IReadOnlyList<string> argumentTypes)
     {
-        if (kinds == SymbolKinds.None)
+        // D 是"只看有文档注释的"开关，不参与种类判断
+        bool documentedOnly = kinds.HasFlag(SymbolKinds.Document);
+        SymbolKinds effectiveKinds = kinds & ~SymbolKinds.Document;
+        if (effectiveKinds == SymbolKinds.None)
         {
-            kinds = SymbolKinds.All;
+            effectiveKinds = SymbolKinds.All;
         }
 
+        QueryFilter filter = new(effectiveKinds, modifiers, argumentTypes, documentedOnly);
         List<SymbolEntry> entries = [];
-        CollectNamespace(compilation.Assembly.GlobalNamespace, entries, kinds, modifiers, argumentTypes);
+        CollectNamespace(compilation.Assembly.GlobalNamespace, entries, filter);
 
         return entries
             .OrderBy(entry => entry.Namespace, StringComparer.Ordinal)
@@ -247,39 +289,32 @@ public static class SymbolQuery
             .ToList();
     }
 
-    private static void CollectNamespace(
-        INamespaceSymbol @namespace,
-        List<SymbolEntry> entries,
-        SymbolKinds kinds,
-        SymbolModifiers modifiers,
-        IReadOnlyList<string> argumentTypes)
+    private static void CollectNamespace(INamespaceSymbol @namespace, List<SymbolEntry> entries, QueryFilter filter)
     {
-        // 给了参数过滤时只看方法：命名空间和类型都不该出现
-        if (argumentTypes.Count == 0 &&
+        // 给了参数过滤时只看方法：命名空间和类型都不该出现；命名空间没有访问性/静态等修饰符，
+        // 所以给了任何修饰符过滤时它都会被排除
+        if (filter.ArgumentTypes.Count == 0 &&
             @namespace.ContainingNamespace != null &&
-            kinds.HasFlag(SymbolKinds.Namespace) &&
-            IsInSource(@namespace))
+            filter.Kinds.HasFlag(SymbolKinds.Namespace) &&
+            IsInSource(@namespace) &&
+            MatchesModifiers(@namespace, filter.Modifiers) &&
+            MatchesDocumented(@namespace, filter))
         {
             entries.Add(Create(@namespace));
         }
 
         foreach (INamedTypeSymbol type in @namespace.GetTypeMembers())
         {
-            CollectType(type, entries, kinds, modifiers, argumentTypes);
+            CollectType(type, entries, filter);
         }
 
         foreach (INamespaceSymbol child in @namespace.GetNamespaceMembers())
         {
-            CollectNamespace(child, entries, kinds, modifiers, argumentTypes);
+            CollectNamespace(child, entries, filter);
         }
     }
 
-    private static void CollectType(
-        INamedTypeSymbol type,
-        List<SymbolEntry> entries,
-        SymbolKinds kinds,
-        SymbolModifiers modifiers,
-        IReadOnlyList<string> argumentTypes)
+    private static void CollectType(INamedTypeSymbol type, List<SymbolEntry> entries, QueryFilter filter)
     {
         if (!IsInSource(type))
         {
@@ -287,7 +322,10 @@ public static class SymbolQuery
             return;
         }
 
-        if (MatchesTypeKind(type, kinds) && MatchesModifiers(type, modifiers) && argumentTypes.Count == 0)
+        if (MatchesTypeKind(type, filter.Kinds) &&
+            MatchesModifiers(type, filter.Modifiers) &&
+            filter.ArgumentTypes.Count == 0 &&
+            MatchesDocumented(type, filter))
         {
             entries.Add(Create(type));
         }
@@ -299,12 +337,10 @@ public static class SymbolQuery
                 continue;
             }
 
-            if (!MatchesMemberKind(member, kinds) || !MatchesModifiers(member, modifiers))
-            {
-                continue;
-            }
-
-            if (!MatchesArguments(member, argumentTypes))
+            if (!MatchesMemberKind(member, filter.Kinds) ||
+                !MatchesModifiers(member, filter.Modifiers) ||
+                !MatchesDocumented(member, filter) ||
+                !MatchesArguments(member, filter.ArgumentTypes))
             {
                 continue;
             }
@@ -314,7 +350,7 @@ public static class SymbolQuery
 
         foreach (INamedTypeSymbol nested in type.GetTypeMembers())
         {
-            CollectType(nested, entries, kinds, modifiers, argumentTypes);
+            CollectType(nested, entries, filter);
         }
     }
 
@@ -341,6 +377,17 @@ public static class SymbolQuery
         };
     }
 
+    /// <summary>D：只保留带 XML 文档注释的符号。</summary>
+    private static bool MatchesDocumented(ISymbol symbol, QueryFilter filter)
+    {
+        if (!filter.DocumentedOnly)
+        {
+            return true;
+        }
+
+        return !string.IsNullOrWhiteSpace(symbol.GetDocumentationCommentXml());
+    }
+
     private static bool MatchesModifiers(ISymbol symbol, SymbolModifiers modifiers)
     {
         if (modifiers == SymbolModifiers.None)
@@ -361,8 +408,11 @@ public static class SymbolQuery
             case Accessibility.ProtectedOrInternal:
                 actual |= SymbolModifiers.Protected;
                 break;
-            case Accessibility.Private:
             case Accessibility.ProtectedAndInternal:
+                // private protected：既是保护也是程序集
+                actual |= SymbolModifiers.Protected | SymbolModifiers.Internal;
+                break;
+            case Accessibility.Private:
                 actual |= SymbolModifiers.Private;
                 break;
         }
@@ -397,7 +447,7 @@ public static class SymbolQuery
             actual |= SymbolModifiers.Override;
         }
 
-        // 全部给定条件都要满足（"公开 + 静态" = 公开且静态）
+        // 全部给定条件都要满足（"公开 + 静态" = 公开且静态；"公开 + 私有" = 空集）
         return (modifiers & actual) == modifiers;
     }
 

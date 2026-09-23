@@ -40,9 +40,14 @@ public sealed class SymbolQueryTests
         throw new InvalidOperationException("找不到仓库根（ZMS.MCP.slnx）。");
     }
 
+    private static string SelfProjectPath()
+    {
+        return Path.Combine(RepositoryRoot(), "src", "ZMS.MCP.Csharp", "ZMS.MCP.Csharp.csproj");
+    }
+
     private static LoadedProject LoadSelf()
     {
-        return LoadedProject.Load(Path.Combine(RepositoryRoot(), "src", "ZMS.MCP.Csharp", "ZMS.MCP.Csharp.csproj"));
+        return LoadedProject.Load(SelfProjectPath());
     }
 
     // ───────── 解析 ─────────
@@ -50,17 +55,10 @@ public sealed class SymbolQueryTests
     [Fact]
     public void ParseKinds_maps_kind_letters()
     {
-        SymbolKinds kinds = SymbolFilterParser.ParseKinds("NCSIPFEMD");
-
-        Assert.True(kinds.HasFlag(SymbolKinds.Namespace));
-        Assert.True(kinds.HasFlag(SymbolKinds.Class));
-        Assert.True(kinds.HasFlag(SymbolKinds.Struct));
-        Assert.True(kinds.HasFlag(SymbolKinds.Interface));
-        Assert.True(kinds.HasFlag(SymbolKinds.Property));
-        Assert.True(kinds.HasFlag(SymbolKinds.Field));
-        Assert.True(kinds.HasFlag(SymbolKinds.Event));
-        Assert.True(kinds.HasFlag(SymbolKinds.Method));
-        Assert.True(kinds.HasFlag(SymbolKinds.Document));
+        Assert.Equal(
+            SymbolKinds.Namespace | SymbolKinds.Class | SymbolKinds.Struct | SymbolKinds.Interface
+            | SymbolKinds.Property | SymbolKinds.Field | SymbolKinds.Event | SymbolKinds.Method | SymbolKinds.Document,
+            SymbolFilterParser.ParseKinds("NCSIPFEMD"));
     }
 
     [Fact]
@@ -77,6 +75,15 @@ public sealed class SymbolQueryTests
         Assert.Equal(SymbolFilterParser.ParseKinds("c"), SymbolFilterParser.ParseKinds("C"));
         Assert.Equal(SymbolKinds.None, SymbolFilterParser.ParseKinds("xyz"));
         Assert.Equal(SymbolKinds.None, SymbolFilterParser.ParseKinds(""));
+    }
+
+    [Fact]
+    public void UnknownKindLetters_reports_typos_instead_of_swallowing_them()
+    {
+        Assert.Equal(['X'], SymbolFilterParser.UnknownKindLetters("X"));
+        Assert.Equal(['X'], SymbolFilterParser.UnknownKindLetters("CxM"));
+        Assert.Empty(SymbolFilterParser.UnknownKindLetters("NCSIPFEMD"));
+        Assert.Empty(SymbolFilterParser.UnknownKindLetters(""));
     }
 
     [Fact]
@@ -157,6 +164,21 @@ public sealed class SymbolQueryTests
     }
 
     [Fact]
+    public void List_with_conflicting_accessibility_returns_empty()
+    {
+        // AND 语义：公开且私有不可能同时成立 → 空集（不是"取或"）
+        LoadedProject project = LoadSelf();
+
+        IReadOnlyList<SymbolEntry> entries = SymbolQuery.List(
+            project.Compilation,
+            SymbolKinds.All,
+            SymbolModifiers.Public | SymbolModifiers.Private,
+            []);
+
+        Assert.Empty(entries);
+    }
+
+    [Fact]
     public void List_filters_methods_by_argument_types()
     {
         LoadedProject project = LoadSelf();
@@ -168,7 +190,7 @@ public sealed class SymbolQueryTests
             ["string"]);
 
         Assert.NotEmpty(entries);
-        // 只列单参数（string）的方法；类型、属性、字段都不该出现
+        // 只列单参数（string）的方法；类型、属性、字段、命名空间都不该出现
         Assert.All(entries, entry => Assert.False(entry.IsType));
         Assert.All(entries, entry => Assert.Equal("method", entry.Kind));
         Assert.All(
@@ -176,20 +198,64 @@ public sealed class SymbolQueryTests
             entry => Assert.Single(((Microsoft.CodeAnalysis.IMethodSymbol)entry.Symbol).Parameters));
     }
 
+    [Fact]
+    public void List_documented_only_lists_symbols_with_xml_docs()
+    {
+        // D：只列带 XML 文档注释的符号（Program.cs 的顶层语句没有注释，不该出现）
+        LoadedProject project = LoadSelf();
+
+        IReadOnlyList<SymbolEntry> entries = SymbolQuery.List(
+            project.Compilation,
+            SymbolKinds.Document,
+            SymbolModifiers.None,
+            []);
+
+        Assert.NotEmpty(entries);
+        Assert.All(
+            entries,
+            entry => Assert.False(string.IsNullOrWhiteSpace(entry.Symbol.GetDocumentationCommentXml())));
+    }
+
+    [Fact]
+    public void List_keeps_nullable_reference_type_modifier_in_signature()
+    {
+        // 签名要能看出可空性：McpStdioServer.RunAsync 的 configure 是 Action<IMcpServerBuilder>?
+        LoadedProject project = LoadSelf();
+
+        IReadOnlyList<SymbolEntry> entries = SymbolQuery.List(
+            project.Compilation,
+            SymbolKinds.Method,
+            SymbolModifiers.None,
+            []);
+
+        Assert.Contains(
+            entries,
+            entry => entry.Signature.Contains("Action<IMcpServerBuilder>?", StringComparison.Ordinal));
+    }
+
     // ───────── 渲染 ─────────
 
     [Fact]
-    public void ListSymbols_renders_namespace_sections_and_members()
+    public void ListSymbols_renders_namespace_sections_types_and_indented_members()
     {
-        string project = Path.Combine(RepositoryRoot(), "src", "ZMS.MCP.Csharp", "ZMS.MCP.Csharp.csproj");
+        string output = SymbolTools.ListSymbols(SelfProjectPath(), "C", "", "");
 
-        string output = ProjectTools.ScanProjects(RepositoryRoot(), 4, "");
-        Assert.Contains("ZMS.MCP.Csharp", output);
-
-        output = SymbolTools.ListSymbols(project, "C", "", "");
         Assert.Contains("## ZMS.MCP.Csharp.Roslyn", output);
-        Assert.Contains("`class LoadedProject`", output);
+        Assert.Contains("- `class LoadedProject`", output);
         // 只要类型时不该出现成员行（成员行以两个空格缩进 + 反引号开头）
         Assert.DoesNotContain("\n  - `", output);
+
+        // 列成员时：成员行必须是两格缩进（正向断言，不只看"没出现"）
+        string withMembers = SymbolTools.ListSymbols(SelfProjectPath(), "M", "", "");
+        Assert.Contains("\n  - `", withMembers);
+    }
+
+    [Fact]
+    public void ListSymbols_warns_about_unknown_kind_letters()
+    {
+        string output = SymbolTools.ListSymbols(SelfProjectPath(), "Cx", "", "");
+
+        Assert.Contains("无法识别的 kind 字母", output);
+        Assert.Contains("X", output);
     }
 }

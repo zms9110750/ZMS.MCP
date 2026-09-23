@@ -35,6 +35,7 @@ public static class SymbolTools
             IReadOnlyList<string> parameters = SymbolFilterParser.ParseArgumentTypes(argumentTypes);
 
             IReadOnlyList<SymbolEntry> entries = SymbolQuery.List(project.Compilation, kinds, modifierFilter, parameters);
+            IReadOnlyList<char> unknownKindLetters = SymbolFilterParser.UnknownKindLetters(kind);
 
             StringBuilder builder = new();
             builder.AppendLine($"# {project.Info.ProjectPath}");
@@ -42,6 +43,11 @@ public static class SymbolTools
             builder.AppendLine(
                 $"- TFM: `{project.Info.TargetFramework}` | 符号: {entries.Count}" +
                 $" | 过滤: kind='{kind}' modifiers='{modifiers}' args='{argumentTypes}'");
+            if (unknownKindLetters.Count > 0)
+            {
+                // 别静默吞掉拼错的字母 —— 否则"筛出来是空的"看起来就像"项目里没符号"
+                builder.AppendLine($"⚠ 无法识别的 kind 字母已忽略：{string.Join(", ", unknownKindLetters)}（可用：N C S I T P F E M D）");
+            }
             if (entries.Count == 0)
             {
                 builder.AppendLine();
@@ -50,27 +56,24 @@ public static class SymbolTools
             }
 
             string? currentNamespace = null;
-            bool insideType = false;
             foreach (SymbolEntry entry in entries)
             {
                 if (!string.Equals(currentNamespace, entry.Namespace, StringComparison.Ordinal))
                 {
                     currentNamespace = entry.Namespace;
-                    insideType = false;
                     builder.AppendLine();
                     builder.AppendLine($"## {(currentNamespace.Length == 0 ? "(global)" : currentNamespace)}");
                 }
 
                 if (entry.IsType)
                 {
-                    insideType = true;
                     builder.AppendLine($"- `{entry.Signature}` ({entry.Kind}){Location(project, entry.Symbol)}");
                     continue;
                 }
 
-                // 成员：缩进一层挂在所属类型下面
-                string indent = insideType ? "  " : "";
-                builder.AppendLine($"{indent}- `{entry.Signature}` ({entry.Kind}){Location(project, entry.Symbol)}");
+                // 成员固定缩进一层（即使这次没列类型也保持稳定），并标注所属类型
+                string container = entry.Container.Length == 0 ? "" : $" [{entry.Container}]";
+                builder.AppendLine($"  - `{entry.Signature}` ({entry.Kind}){container}{Location(project, entry.Symbol)}");
             }
 
             return builder.ToString();
