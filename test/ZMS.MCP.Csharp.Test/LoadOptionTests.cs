@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Xunit;
@@ -27,8 +28,11 @@ public sealed class LoadOptionTests
     [Theory]
     [InlineData("", LanguageVersion.Default)]
     [InlineData("nonsense", LanguageVersion.Default)]
+    [InlineData("default", LanguageVersion.Default)]
     [InlineData("preview", LanguageVersion.Preview)]
     [InlineData("latest", LanguageVersion.Latest)]
+    [InlineData("latestMajor", LanguageVersion.LatestMajor)]
+    [InlineData("12.0", LanguageVersion.CSharp12)]
     public void ParseLanguageVersion_falls_back_to_default(string value, LanguageVersion expected)
     {
         // 关键：缺失时回退 Default 而不是 Preview（Preview 会接受实验语法 → 假阴性）
@@ -40,6 +44,8 @@ public sealed class LoadOptionTests
     [InlineData(typeof(TimeoutException), true)]
     [InlineData(typeof(IOException), true)]
     [InlineData(typeof(UnauthorizedAccessException), true)]
+    // dotnet 不在 PATH 时 Process.Start 抛的就是它：必须降级，否则没装 SDK 的机器直接报错
+    [InlineData(typeof(Win32Exception), true)]
     [InlineData(typeof(OutOfMemoryException), false)]
     [InlineData(typeof(OperationCanceledException), false)]
     [InlineData(typeof(ArgumentNullException), false)]

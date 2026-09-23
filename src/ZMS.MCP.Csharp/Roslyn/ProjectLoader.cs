@@ -340,15 +340,26 @@ public sealed class LoadedProject
         return exception is InvalidOperationException
             or TimeoutException
             or IOException
-            or UnauthorizedAccessException;
+            or UnauthorizedAccessException
+            // dotnet 不在 PATH、找不到可执行文件时 Process.Start 抛的是它，同样属于"评估失败"该降级
+            or System.ComponentModel.Win32Exception;
     }
 
-    /// <summary>把异常压成一行短摘要（MSBuild 原文可能上千字符，不能整段带回工具输出）。</summary>
+    /// <summary>MSBuild / NuGet / 编译器的错误码形态，如 MSB1003、NETSDK1004、CS0246、NU1101。</summary>
+    private static readonly Regex ErrorCodeRegex = new("[A-Z]{2,10}\\d{3,5}", RegexOptions.Compiled);
+
+    /// <summary>
+    /// 把异常压成一行短摘要（MSBuild 原文可能上千字符，不能整段带回工具输出）。
+    /// 多行时优先挑带错误码的那一行 —— 那才是根因所在。
+    /// </summary>
     private static string Summarize(Exception exception)
     {
-        string message = exception.Message.Trim();
-        int newline = message.IndexOfAny(['\r', '\n']);
-        string line = newline >= 0 ? message[..newline] : message;
+        string[] lines = exception.Message.Split(
+            ['\r', '\n'],
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        string line = lines.FirstOrDefault(candidate => ErrorCodeRegex.IsMatch(candidate))
+            ?? lines.FirstOrDefault()
+            ?? exception.Message.Trim();
 
         const int limit = 240;
         if (line.Length > limit)
