@@ -295,7 +295,7 @@ public sealed class LoadedProject
     /// <summary>本次加载走的是评估还是降级。</summary>
     public LoadMode Mode { get; }
 
-    /// <summary>降级原因（<see cref="LoadMode.Evaluated"/> 时为空）。</summary>
+    /// <summary>降级原因（短摘要，<see cref="LoadMode.Evaluated"/> 时为空）。</summary>
     public string FallbackReason { get; }
 
     private LoadedProject(ProjectFileInfo info, CSharpCompilation compilation, LoadMode mode, string fallbackReason)
@@ -322,12 +322,41 @@ public sealed class LoadedProject
         {
             evaluation = MsBuildEvaluator.Evaluate(info.ProjectPath);
         }
-        catch (Exception exception)
+        catch (Exception exception) when (IsFallbackWorthy(exception))
         {
-            return Fallback(info, $"{exception.GetType().Name}: {exception.Message}");
+            return Fallback(info, Summarize(exception));
         }
 
         return Evaluated(info, evaluation);
+    }
+
+    /// <summary>
+    /// 哪些异常才值得降级：MSBuild 评估本身的契约失败（未还原、SDK 不匹配、超时、IO）。
+    /// 其余（<see cref="OutOfMemoryException"/>、<see cref="OperationCanceledException"/>、编程错误）
+    /// 照实抛出 —— 降级只会把真问题藏成"简化模式"。
+    /// </summary>
+    internal static bool IsFallbackWorthy(Exception exception)
+    {
+        return exception is InvalidOperationException
+            or TimeoutException
+            or IOException
+            or UnauthorizedAccessException;
+    }
+
+    /// <summary>把异常压成一行短摘要（MSBuild 原文可能上千字符，不能整段带回工具输出）。</summary>
+    private static string Summarize(Exception exception)
+    {
+        string message = exception.Message.Trim();
+        int newline = message.IndexOfAny(['\r', '\n']);
+        string line = newline >= 0 ? message[..newline] : message;
+
+        const int limit = 240;
+        if (line.Length > limit)
+        {
+            line = line[..limit] + "…";
+        }
+
+        return $"{exception.GetType().Name}: {line}";
     }
 
     /// <summary>
@@ -373,6 +402,8 @@ public sealed class LoadedProject
 
     private static LoadedProject Fallback(ProjectFileInfo info, string reason)
     {
+        // 降级是有意放宽：真实的语言版本 / 可空性拿不到，宁可少报错，
+        // 也别用不可信的设置刷出一片假错误（提示见 ModeNotice）。
         CSharpParseOptions parseOptions = new(LanguageVersion.Preview);
         List<SyntaxTree> trees = ParseTrees(info.SourceFiles, parseOptions);
 
@@ -440,13 +471,13 @@ public sealed class LoadedProject
     /// 语言版本：缺失或不可解析时用 <see cref="LanguageVersion.Default"/>。
     /// 不能用 Preview —— 那会接受实验语法，把"该报错的代码"放过去（假阴性）。
     /// </summary>
-    private static LanguageVersion ParseLanguageVersion(string value)
+    internal static LanguageVersion ParseLanguageVersion(string value)
     {
         return LanguageVersionFacts.TryParse(value, out LanguageVersion version) ? version : LanguageVersion.Default;
     }
 
     /// <summary>可空性：MSBuild 里"没设置"等价于 disable，不是 enable。</summary>
-    private static NullableContextOptions ParseNullable(string value)
+    internal static NullableContextOptions ParseNullable(string value)
     {
         if (string.Equals(value, "enable", StringComparison.OrdinalIgnoreCase))
         {
