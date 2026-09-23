@@ -213,4 +213,99 @@ public sealed class DocSymbolTests
         Assert.Contains("生效 type: `T`", output);
         Assert.Contains("T:Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree", output);
     }
+
+    // ───────── 泛型、D/N 语义、TFM 分档 ─────────
+
+    [Fact]
+    public void Query_matches_generic_names_without_arity_suffix()
+    {
+        // XML 里泛型是 T:Demo.Box`1 / M:Demo.Box`1.Add``1(...)，调用方只写裸名
+        IReadOnlyList<DocEntry> entries = ReadXml("""
+            <?xml version="1.0"?>
+            <doc><members>
+              <member name="T:Demo.Box`1"><summary>Box.</summary></member>
+              <member name="P:Demo.Box`1.Value"><summary>Value.</summary></member>
+              <member name="M:Demo.Box`1.Add``1(``0)"><summary>Generic method.</summary></member>
+            </members></doc>
+            """);
+
+        DocQueryResult type = DocSymbolQuery.Query(entries, "Demo.Box", [], "");
+        Assert.Contains(type.Entries, entry => entry.MemberName == "P:Demo.Box`1.Value");
+
+        DocQueryResult method = DocSymbolQuery.Query(entries, "Demo.Box.Add", [], "");
+        Assert.Equal("M:Demo.Box`1.Add``1(``0)", Assert.Single(method.Entries).MemberName);
+    }
+
+    [Fact]
+    public void Query_disambiguates_arguments_with_generic_commas()
+    {
+        // 泛型实参里的逗号不是参数分隔符
+        IReadOnlyList<DocEntry> entries = ReadXml("""
+            <?xml version="1.0"?>
+            <doc><members>
+              <member name="T:Demo.Outer"><summary>Outer.</summary></member>
+              <member name="M:Demo.Outer.Map(System.Collections.Generic.Dictionary{System.String,System.Int32})"><summary>Map dict.</summary></member>
+              <member name="M:Demo.Outer.Map(System.Collections.Generic.Dictionary{System.String,System.Int32},System.Boolean)"><summary>Map dict + flag.</summary></member>
+            </members></doc>
+            """);
+
+        DocQueryResult result = DocSymbolQuery.Query(
+            entries,
+            "Demo.Outer.Map",
+            ["System.Collections.Generic.Dictionary{System.String,System.Int32}"],
+            "");
+
+        Assert.Equal(
+            "M:Demo.Outer.Map(System.Collections.Generic.Dictionary{System.String,System.Int32})",
+            Assert.Single(result.Entries).MemberName);
+    }
+
+    [Fact]
+    public void Query_with_explicit_namespace_kind_lists_types_instead_of_throwing()
+    {
+        // N 不能当成"不含 T 就找不到"：XML 里没有 N: 条目，N 就是"按前缀列类型"
+        DocQueryResult result = DocSymbolQuery.Query(SampleEntries(), "Demo", [], "N");
+
+        Assert.Equal("N", result.EffectiveKinds);
+        Assert.False(result.KindsWereInferred);
+        Assert.Contains(result.Entries, entry => entry.FullName == "Demo.Outer");
+        Assert.Contains("N:", result.Note);
+    }
+
+    [Fact]
+    public void Query_with_explicit_D_returns_raw_fragments()
+    {
+        // D 是输出开关，不是条目种类：它不该把命中结果过滤成空
+        DocQueryResult result = DocSymbolQuery.Query(SampleEntries(), "Demo.Outer.Foo", [], "D");
+
+        Assert.Equal("D", result.EffectiveKinds);
+        Assert.Equal(3, result.Entries.Count);
+        Assert.All(result.Entries, entry => Assert.Contains("<summary>", entry.Xml));
+
+        string output = DocSymbolTools.Render(new DocSource("Demo", "1.0.0", "net10.0", ["Demo.xml"]), result, 12);
+
+        Assert.Contains("```xml", output);
+        Assert.Contains("条目总数: 12", output);
+    }
+
+    [Fact]
+    public void TargetFrameworkScore_prefers_modern_over_legacy()
+    {
+        // net48 里的 "48" 是 4.8，不能被当成版本 48 压过 net10.0
+        Assert.True(NuGetXmlDocumentation.TargetFrameworkScore("net10.0") > NuGetXmlDocumentation.TargetFrameworkScore("net48"));
+        Assert.True(NuGetXmlDocumentation.TargetFrameworkScore("net8.0") > NuGetXmlDocumentation.TargetFrameworkScore("net481"));
+        Assert.True(NuGetXmlDocumentation.TargetFrameworkScore("net48") > NuGetXmlDocumentation.TargetFrameworkScore("net472"));
+        Assert.True(NuGetXmlDocumentation.TargetFrameworkScore("net48") > NuGetXmlDocumentation.TargetFrameworkScore("netstandard2.0"));
+        Assert.True(NuGetXmlDocumentation.TargetFrameworkScore("net8.0") > NuGetXmlDocumentation.TargetFrameworkScore("netcoreapp3.1"));
+    }
+
+    /// <summary>把一段 XML 写进临时文件再读，用于验证解析/查询细节。</summary>
+    private static IReadOnlyList<DocEntry> ReadXml(string xml)
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "zms-mcp-doc-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        string file = Path.Combine(directory, "Sample.xml");
+        File.WriteAllText(file, xml);
+        return NuGetXmlDocumentation.Read(file);
+    }
 }

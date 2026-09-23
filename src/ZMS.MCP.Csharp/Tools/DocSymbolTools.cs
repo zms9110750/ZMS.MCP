@@ -66,9 +66,9 @@ public static class DocSymbolTools
 
         foreach (DocEntry entry in result.Entries)
         {
-            if (result.EffectiveKinds.Contains('D') && result.Entries.Count == 1)
+            if (result.EffectiveKinds.Contains('D'))
             {
-                // D：原始 XML 片段
+                // D：给原始 XML 片段（可以有多条，比如显式 type=D 查一个类型）
                 builder.AppendLine("```xml");
                 builder.AppendLine(entry.Xml);
                 builder.AppendLine("```");
@@ -86,7 +86,9 @@ public static class DocSymbolTools
     private static DocQueryResult AllTypes(IReadOnlyList<DocEntry> entries, string explicitKinds)
     {
         string kinds = explicitKinds.Length > 0 ? explicitKinds : "T";
-        List<DocEntry> types = kinds.Contains('T')
+        // D 是"输出原始片段"的开关，不参与种类过滤
+        string letters = kinds.Replace("D", "");
+        List<DocEntry> types = letters.Length == 0 || letters.Contains('T')
             ? entries.Where(entry => entry.Kind == 'T').ToList()
             : [];
 
@@ -107,8 +109,7 @@ public static class DocSymbolTools
             return [];
         }
 
-        return trimmed
-            .Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .ToList();
+        // 交给查询层按嵌套深度切：泛型实参里的逗号不是参数分隔符
+        return DocSymbolQuery.SplitParameters(trimmed);
     }
 }

@@ -219,24 +219,50 @@ public static class NuGetXmlDocumentation
             .First();
     }
 
-    /// <summary>给 TFM 打分：net10.0 &gt; net8.0 &gt; netstandard2.0（netstandard 降权）。</summary>
-    private static int TargetFrameworkScore(string framework)
+    /// <summary>
+    /// 给 TFM 打分分档：新式 netX.Y &gt; netcoreappX.Y &gt; .NET Framework(net48) &gt; netstandard。
+    /// 注意 net48 里的 "48" 是 4.8，不能当成版本 48 去和 net10.0 比大小。
+    /// （internal 是为了让分档规则能被单测直接验证。）
+    /// </summary>
+    internal static int TargetFrameworkScore(string framework)
     {
-        Match match = Regex.Match(framework, @"^(net|netcoreapp|netstandard)(\d+)(?:\.(\d+))?$", RegexOptions.IgnoreCase);
-        if (!match.Success)
+        Match modern = Regex.Match(framework, @"^net(\d+)\.(\d+)$", RegexOptions.IgnoreCase);
+        if (modern.Success)
         {
-            return -1;
+            return 20_000 + int.Parse(modern.Groups[1].Value) * 100 + int.Parse(modern.Groups[2].Value);
         }
 
-        int major = int.Parse(match.Groups[2].Value);
-        int minor = match.Groups[3].Success ? int.Parse(match.Groups[3].Value) : 0;
-        int score = major * 100 + minor;
-        if (match.Groups[1].Value.Equals("netstandard", StringComparison.OrdinalIgnoreCase))
+        Match core = Regex.Match(framework, @"^netcoreapp(\d+)\.(\d+)$", RegexOptions.IgnoreCase);
+        if (core.Success)
         {
-            score -= 10_000;
+            return 15_000 + int.Parse(core.Groups[1].Value) * 100 + int.Parse(core.Groups[2].Value);
         }
 
-        return score;
+        // .NET Framework：net48 / net472 / net40（不写点，首位是主版本，逐位是次版本与修正号）
+        Match legacy = Regex.Match(framework, @"^net(\d)(\d)?(\d)?$", RegexOptions.IgnoreCase);
+        if (legacy.Success)
+        {
+            int score = 5_000 + int.Parse(legacy.Groups[1].Value) * 100;
+            if (legacy.Groups[2].Success)
+            {
+                score += int.Parse(legacy.Groups[2].Value) * 10;
+            }
+
+            if (legacy.Groups[3].Success)
+            {
+                score += int.Parse(legacy.Groups[3].Value);
+            }
+
+            return score;
+        }
+
+        Match standard = Regex.Match(framework, @"^netstandard(\d+)\.(\d+)$", RegexOptions.IgnoreCase);
+        if (standard.Success)
+        {
+            return 1_000 + int.Parse(standard.Groups[1].Value) * 100 + int.Parse(standard.Groups[2].Value);
+        }
+
+        return -1;
     }
 
     /// <summary>按点分段的数值比较版本号（忽略预发布后缀）。</summary>
@@ -342,17 +368,17 @@ public static class DocSymbolQuery
 
         // A) 精确命中某个类型 → 缺省 PFME（类型本体要显式带 T）
         DocEntry? exactType = entries.FirstOrDefault(
-            entry => entry.Kind == 'T' && string.Equals(entry.FullName, trimmed, StringComparison.Ordinal));
+            entry => entry.Kind == 'T' && NameMatchesIgnoringArity(trimmed, entry.FullName));
         if (exactType != null)
         {
             string kinds = explicitGiven ? explicitKinds : "PFME";
             List<DocEntry> matched = entries
-                .Where(entry => IsMemberOf(entry, trimmed, entries))
-                .Where(entry => ContainsKind(kinds, entry.Kind))
+                .Where(entry => IsMemberOf(entry, exactType.FullName, entries))
+                .Where(entry => AcceptsKind(kinds, entry.Kind))
                 .Where(entry => MatchesArguments(entry, argumentTypes))
                 .ToList();
 
-            if (ContainsKind(kinds, 'T'))
+            if (kinds.Contains('T'))
             {
                 matched.Insert(0, exactType);
             }
@@ -361,17 +387,17 @@ public static class DocSymbolQuery
         }
 
         // B) 类型全名 + 成员名 → 唯一成员给 D（原始片段），重载给 M
-        (string TypePath, string MemberName)? split = SplitMemberPath(entries, trimmed);
+        (DocEntry TypeEntry, string MemberName)? split = SplitMemberPath(entries, trimmed);
         if (split != null)
         {
-            List<DocEntry> matched = MatchMembers(entries, split.Value.TypePath, split.Value.MemberName, argumentTypes);
+            List<DocEntry> matched = MatchMembers(entries, split.Value.TypeEntry, split.Value.MemberName, argumentTypes);
             if (matched.Count > 0)
             {
                 string inferred = matched.Count == 1 ? "D" : "M";
                 string kinds = explicitGiven ? explicitKinds : inferred;
                 if (explicitGiven)
                 {
-                    matched = matched.Where(entry => ContainsKind(kinds, entry.Kind)).ToList();
+                    matched = matched.Where(entry => AcceptsKind(kinds, entry.Kind)).ToList();
                 }
 
                 string note = matched.Count > 1 && !explicitGiven
@@ -381,9 +407,9 @@ public static class DocSymbolQuery
             }
         }
 
-        // C) 当成命名空间前缀 → 缺省 T
+        // C) 当成命名空间前缀 → 缺省 T（N 也走这里：XML 里没有 N: 条目）
         string namespaceKinds = explicitGiven ? explicitKinds : "T";
-        if (ContainsKind(namespaceKinds, 'T'))
+        if (namespaceKinds.Contains('T') || namespaceKinds.Contains('N'))
         {
             string prefix = trimmed + ".";
             List<DocEntry> types = entries
@@ -396,16 +422,49 @@ public static class DocSymbolQuery
                     namespaceKinds,
                     !explicitGiven,
                     types,
-                    "XML 里没有 N: 条目，这里把 path 当成命名空间前缀，用类型全名反推（没有文档注释的类型会漏）。");
+                    "XML 里没有 N: 条目，命名空间只能靠调用方手传前缀 + 类型全名反推（没有文档注释的类型会漏）。");
             }
         }
 
         throw new InvalidOperationException($"文档里找不到 '{trimmed}'。");
     }
 
-    private static bool ContainsKind(string kinds, char kind)
+    /// <summary>
+    /// 种类过滤。<c>D</c> 不是一种条目种类（XML 里没有 <c>D:</c> 条目），而是"输出原始片段"的开关，
+    /// 所以它不参与过滤；只给 D 时按"全部种类"处理。
+    /// </summary>
+    private static bool AcceptsKind(string kinds, char kind)
     {
-        return kinds.Contains(char.ToUpperInvariant(kind));
+        string letters = kinds.Replace("D", "");
+        return letters.Length == 0 || letters.Contains(kind);
+    }
+
+    /// <summary>
+    /// 名字相等判定，容忍泛型元数后缀：XML 里泛型类型是 <c>T:Ns.Type`1</c>、泛型方法是
+    /// <c>M:Ns.Type.Foo``1</c>，而调用方一般只写 <c>Ns.Type</c> / <c>Ns.Type.Foo</c>。
+    /// </summary>
+    internal static bool NameMatchesIgnoringArity(string query, string actual)
+    {
+        if (string.Equals(query, actual, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return actual.Length > query.Length
+            && actual.StartsWith(query, StringComparison.Ordinal)
+            && IsAritySuffix(actual[query.Length..]);
+    }
+
+    /// <summary>形如 <c>`1</c>（类型）或 <c>``2</c>（方法）的元数后缀。</summary>
+    private static bool IsAritySuffix(string value)
+    {
+        int index = 0;
+        while (index < value.Length && value[index] == '`')
+        {
+            index++;
+        }
+
+        return index > 0 && index < value.Length && value[index..].All(char.IsDigit);
     }
 
     /// <summary>成员前缀匹配，并排除"挂在该类型下嵌套类型"上的成员。</summary>
@@ -435,7 +494,7 @@ public static class DocSymbolQuery
     }
 
     /// <summary>从右往左找"确实是类型"的最长前缀，其余当成员名。</summary>
-    private static (string TypePath, string MemberName)? SplitMemberPath(IReadOnlyList<DocEntry> entries, string path)
+    private static (DocEntry TypeEntry, string MemberName)? SplitMemberPath(IReadOnlyList<DocEntry> entries, string path)
     {
         int end = path.Length;
         while (true)
@@ -447,9 +506,11 @@ public static class DocSymbolQuery
             }
 
             string candidate = path[..dot];
-            if (entries.Any(entry => entry.Kind == 'T' && string.Equals(entry.FullName, candidate, StringComparison.Ordinal)))
+            DocEntry? type = entries.FirstOrDefault(
+                entry => entry.Kind == 'T' && NameMatchesIgnoringArity(candidate, entry.FullName));
+            if (type != null)
             {
-                return (candidate, path[(dot + 1)..]);
+                return (type, path[(dot + 1)..]);
             }
 
             end = dot;
@@ -458,14 +519,14 @@ public static class DocSymbolQuery
 
     private static List<DocEntry> MatchMembers(
         IReadOnlyList<DocEntry> entries,
-        string typePath,
+        DocEntry typeEntry,
         string memberName,
         IReadOnlyList<string> argumentTypes)
     {
-        string prefix = typePath + "." + memberName;
+        string query = typeEntry.FullName + "." + memberName;
         return entries
             .Where(entry => entry.Kind is 'P' or 'F' or 'M' or 'E')
-            .Where(entry => string.Equals(entry.Prefix, prefix, StringComparison.Ordinal))
+            .Where(entry => NameMatchesIgnoringArity(query, entry.Prefix))
             .Where(entry => MatchesArguments(entry, argumentTypes))
             .ToList();
     }
@@ -483,7 +544,7 @@ public static class DocSymbolQuery
             return false;
         }
 
-        string[] actual = entry.Parameters.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        string[] actual = SplitParameters(entry.Parameters);
         if (actual.Length != argumentTypes.Count)
         {
             return false;
@@ -498,6 +559,37 @@ public static class DocSymbolQuery
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// 按**顶层**逗号切分参数段：泛型实参里的逗号（<c>Dictionary{System.String,System.Int32}</c>）
+    /// 不是参数分隔符，靠 <c>{}</c> / <c>()</c> / <c>[]</c> 的嵌套深度区分。
+    /// </summary>
+    internal static string[] SplitParameters(string value)
+    {
+        List<string> parts = [];
+        int depth = 0;
+        int start = 0;
+        for (int index = 0; index < value.Length; index++)
+        {
+            char current = value[index];
+            if (current is '{' or '(' or '[')
+            {
+                depth++;
+            }
+            else if (current is '}' or ')' or ']')
+            {
+                depth--;
+            }
+            else if (current == ',' && depth == 0)
+            {
+                parts.Add(value[start..index].Trim());
+                start = index + 1;
+            }
+        }
+
+        parts.Add(value[start..].Trim());
+        return parts.Where(part => part.Length > 0).ToArray();
     }
 
     private static bool ParameterMatches(string expected, string actual)
