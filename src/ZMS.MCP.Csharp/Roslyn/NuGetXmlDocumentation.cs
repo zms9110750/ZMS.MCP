@@ -222,17 +222,18 @@ public static class NuGetXmlDocumentation
     /// <summary>
     /// 给 TFM 打分分档：新式 netX.Y &gt; netcoreappX.Y &gt; .NET Framework(net48) &gt; netstandard。
     /// 注意 net48 里的 "48" 是 4.8，不能当成版本 48 去和 net10.0 比大小。
+    /// 平台后缀（<c>net8.0-windows</c>）不参与分档，只看前面的框架版本。
     /// （internal 是为了让分档规则能被单测直接验证。）
     /// </summary>
     internal static int TargetFrameworkScore(string framework)
     {
-        Match modern = Regex.Match(framework, @"^net(\d+)\.(\d+)$", RegexOptions.IgnoreCase);
+        Match modern = Regex.Match(framework, @"^net(\d+)\.(\d+)(?:-[a-zA-Z0-9.]+)?$", RegexOptions.IgnoreCase);
         if (modern.Success)
         {
             return 20_000 + int.Parse(modern.Groups[1].Value) * 100 + int.Parse(modern.Groups[2].Value);
         }
 
-        Match core = Regex.Match(framework, @"^netcoreapp(\d+)\.(\d+)$", RegexOptions.IgnoreCase);
+        Match core = Regex.Match(framework, @"^netcoreapp(\d+)\.(\d+)(?:-[a-zA-Z0-9.]+)?$", RegexOptions.IgnoreCase);
         if (core.Success)
         {
             return 15_000 + int.Parse(core.Groups[1].Value) * 100 + int.Parse(core.Groups[2].Value);
@@ -256,7 +257,7 @@ public static class NuGetXmlDocumentation
             return score;
         }
 
-        Match standard = Regex.Match(framework, @"^netstandard(\d+)\.(\d+)$", RegexOptions.IgnoreCase);
+        Match standard = Regex.Match(framework, @"^netstandard(\d+)\.(\d+)(?:-[a-zA-Z0-9.]+)?$", RegexOptions.IgnoreCase);
         if (standard.Success)
         {
             return 1_000 + int.Parse(standard.Groups[1].Value) * 100 + int.Parse(standard.Groups[2].Value);
@@ -265,7 +266,10 @@ public static class NuGetXmlDocumentation
         return -1;
     }
 
-    /// <summary>按点分段的数值比较版本号（忽略预发布后缀）。</summary>
+    /// <summary>版本号比较器（internal 是为了让排序规则能被单测直接验证）。</summary>
+    internal static IComparer<string> VersionComparer => VersionTextComparer.Instance;
+
+    /// <summary>按点分段的数值比较版本号；数值相同时正式版排在预发布版之前。</summary>
     private sealed class VersionTextComparer : IComparer<string>
     {
         public static readonly VersionTextComparer Instance = new();
@@ -286,7 +290,20 @@ public static class NuGetXmlDocumentation
                 }
             }
 
+            // 数值一样：1.0.0 要排在 1.0.0-beta 之前（调用方按降序取第一个，所以正式版要返回更"大"）
+            bool leftPrerelease = IsPrerelease(left);
+            bool rightPrerelease = IsPrerelease(right);
+            if (leftPrerelease != rightPrerelease)
+            {
+                return leftPrerelease ? -1 : 1;
+            }
+
             return string.CompareOrdinal(left, right);
+        }
+
+        private static bool IsPrerelease(string? value)
+        {
+            return (value ?? "").IndexOfAny(['-', '+']) >= 0;
         }
 
         private static int[] Parse(string? value)
@@ -367,8 +384,7 @@ public static class DocSymbolQuery
         bool explicitGiven = explicitKinds.Length > 0;
 
         // A) 精确命中某个类型 → 缺省 PFME（类型本体要显式带 T）
-        DocEntry? exactType = entries.FirstOrDefault(
-            entry => entry.Kind == 'T' && NameMatchesIgnoringArity(trimmed, entry.FullName));
+        DocEntry? exactType = FindType(entries, trimmed);
         if (exactType != null)
         {
             string kinds = explicitGiven ? explicitKinds : "PFME";
@@ -440,6 +456,18 @@ public static class DocSymbolQuery
     }
 
     /// <summary>
+    /// 找类型条目：**精确相等优先**，找不到再容忍泛型元数后缀。
+    /// <c>Tuple</c> 与 <c>Tuple`1</c> 这样的同名泛型/非泛型类型能同时存在，精确的那个必须先命中。
+    /// </summary>
+    private static DocEntry? FindType(IReadOnlyList<DocEntry> entries, string name)
+    {
+        DocEntry? exact = entries.FirstOrDefault(
+            entry => entry.Kind == 'T' && string.Equals(entry.FullName, name, StringComparison.Ordinal));
+        return exact ?? entries.FirstOrDefault(
+            entry => entry.Kind == 'T' && NameMatchesIgnoringArity(name, entry.FullName));
+    }
+
+    /// <summary>
     /// 名字相等判定，容忍泛型元数后缀：XML 里泛型类型是 <c>T:Ns.Type`1</c>、泛型方法是
     /// <c>M:Ns.Type.Foo``1</c>，而调用方一般只写 <c>Ns.Type</c> / <c>Ns.Type.Foo</c>。
     /// </summary>
@@ -488,9 +516,11 @@ public static class DocSymbolQuery
             return true;
         }
 
-        // 「.」后面还有东西：只有当它不是嵌套类型时才算这个类型的成员
+        // 「.」后面还有东西：只有当它不是嵌套类型时才算这个类型的成员。
+        // 嵌套类型自己也可能泛型（T:Ns.Outer`1.Inner`1），所以这里也要容忍元数后缀。
         string nestedType = prefix + rest[..dot];
-        return !entries.Any(candidate => candidate.Kind == 'T' && string.Equals(candidate.FullName, nestedType, StringComparison.Ordinal));
+        return !entries.Any(
+            candidate => candidate.Kind == 'T' && NameMatchesIgnoringArity(nestedType, candidate.FullName));
     }
 
     /// <summary>从右往左找"确实是类型"的最长前缀，其余当成员名。</summary>
@@ -506,8 +536,7 @@ public static class DocSymbolQuery
             }
 
             string candidate = path[..dot];
-            DocEntry? type = entries.FirstOrDefault(
-                entry => entry.Kind == 'T' && NameMatchesIgnoringArity(candidate, entry.FullName));
+            DocEntry? type = FindType(entries, candidate);
             if (type != null)
             {
                 return (type, path[(dot + 1)..]);
@@ -562,8 +591,9 @@ public static class DocSymbolQuery
     }
 
     /// <summary>
-    /// 按**顶层**逗号切分参数段：泛型实参里的逗号（<c>Dictionary{System.String,System.Int32}</c>）
-    /// 不是参数分隔符，靠 <c>{}</c> / <c>()</c> / <c>[]</c> 的嵌套深度区分。
+    /// 按**顶层**逗号切分参数段：泛型实参里的逗号（<c>Dictionary{System.String,System.Int32}</c>、
+    /// 调用方手写的 <c>Dictionary&lt;System.String,System.Int32&gt;</c>）不是参数分隔符，
+    /// 靠 <c>{}</c> / <c>&lt;&gt;</c> / <c>()</c> / <c>[]</c> 的嵌套深度区分。
     /// </summary>
     internal static string[] SplitParameters(string value)
     {
@@ -573,11 +603,11 @@ public static class DocSymbolQuery
         for (int index = 0; index < value.Length; index++)
         {
             char current = value[index];
-            if (current is '{' or '(' or '[')
+            if (IsOpen(current))
             {
                 depth++;
             }
-            else if (current is '}' or ')' or ']')
+            else if (IsClose(current))
             {
                 depth--;
             }
@@ -600,7 +630,7 @@ public static class DocSymbolQuery
             return true;
         }
 
-        string shortName = normalized.Contains('.') ? normalized[(normalized.LastIndexOf('.') + 1)..] : normalized;
+        string shortName = ShortName(normalized);
         if (string.Equals(expected, shortName, StringComparison.Ordinal))
         {
             return true;
@@ -612,5 +642,43 @@ public static class DocSymbolQuery
         }
 
         return string.Equals(expected, shortName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// 取**顶层**最后一段：泛型实参里的点不算分隔符，
+    /// 所以 <c>System.Collections.Generic.List{System.Int32}</c> 的短名是 <c>List{System.Int32}</c>（不是 <c>Int32}</c>）。
+    /// </summary>
+    private static string ShortName(string value)
+    {
+        int depth = 0;
+        int lastDot = -1;
+        for (int index = 0; index < value.Length; index++)
+        {
+            char current = value[index];
+            if (IsOpen(current))
+            {
+                depth++;
+            }
+            else if (IsClose(current))
+            {
+                depth--;
+            }
+            else if (current == '.' && depth == 0)
+            {
+                lastDot = index;
+            }
+        }
+
+        return lastDot < 0 ? value : value[(lastDot + 1)..];
+    }
+
+    private static bool IsOpen(char value)
+    {
+        return value is '{' or '<' or '(' or '[';
+    }
+
+    private static bool IsClose(char value)
+    {
+        return value is '}' or '>' or ')' or ']';
     }
 }

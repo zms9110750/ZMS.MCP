@@ -33,11 +33,7 @@ public sealed class DocSymbolTests
 
     private static IReadOnlyList<DocEntry> SampleEntries()
     {
-        string directory = Path.Combine(Path.GetTempPath(), "zms-mcp-doc-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(directory);
-        string file = Path.Combine(directory, "Sample.xml");
-        File.WriteAllText(file, SampleXml);
-        return NuGetXmlDocumentation.Read(file);
+        return ReadXml(SampleXml);
     }
 
     // ───────── 解析 ─────────
@@ -57,7 +53,7 @@ public sealed class DocSymbolTests
 
         DocEntry withoutParams = entries.First(entry => entry.MemberName == "M:Demo.Outer.Foo");
         Assert.Equal("", withoutParams.Parameters);
-        Assert.Equal("One int.".Length > 0 ? "No args." : "", withoutParams.Summary);
+        Assert.Equal("No args.", withoutParams.Summary);
     }
 
     // ───────── 精度推断 ─────────
@@ -214,7 +210,7 @@ public sealed class DocSymbolTests
         Assert.Contains("T:Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree", output);
     }
 
-    // ───────── 泛型、D/N 语义、TFM 分档 ─────────
+    // ───────── 泛型、D/N 语义、TFM 与版本排序 ─────────
 
     [Fact]
     public void Query_matches_generic_names_without_arity_suffix()
@@ -234,6 +230,26 @@ public sealed class DocSymbolTests
 
         DocQueryResult method = DocSymbolQuery.Query(entries, "Demo.Box.Add", [], "");
         Assert.Equal("M:Demo.Box`1.Add``1(``0)", Assert.Single(method.Entries).MemberName);
+    }
+
+    [Fact]
+    public void Query_generic_nested_type_members_do_not_leak_into_outer_type()
+    {
+        // 嵌套类型自己也可能泛型：T:Demo.Outer`1.Inner`1
+        IReadOnlyList<DocEntry> entries = ReadXml("""
+            <?xml version="1.0"?>
+            <doc><members>
+              <member name="T:Demo.Outer`1"><summary>Outer.</summary></member>
+              <member name="T:Demo.Outer`1.Inner`1"><summary>Nested generic.</summary></member>
+              <member name="P:Demo.Outer`1.Value"><summary>Outer value.</summary></member>
+              <member name="M:Demo.Outer`1.Inner`1.Bar"><summary>Nested member.</summary></member>
+            </members></doc>
+            """);
+
+        DocQueryResult outer = DocSymbolQuery.Query(entries, "Demo.Outer", [], "");
+
+        Assert.Contains(outer.Entries, entry => entry.MemberName == "P:Demo.Outer`1.Value");
+        Assert.DoesNotContain(outer.Entries, entry => entry.MemberName.Contains("Inner", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -258,6 +274,17 @@ public sealed class DocSymbolTests
         Assert.Equal(
             "M:Demo.Outer.Map(System.Collections.Generic.Dictionary{System.String,System.Int32})",
             Assert.Single(result.Entries).MemberName);
+    }
+
+    [Fact]
+    public void SplitParameters_ignores_commas_inside_brackets()
+    {
+        // 调用方可能按 C# 习惯写尖括号，尖括号里的逗号同样不是分隔符
+        Assert.Equal(
+            ["System.Collections.Generic.Dictionary<System.String,System.Int32>", "System.Boolean"],
+            DocSymbolQuery.SplitParameters("System.Collections.Generic.Dictionary<System.String,System.Int32>,System.Boolean"));
+        Assert.Equal(["int"], DocSymbolQuery.SplitParameters("int"));
+        Assert.Empty(DocSymbolQuery.SplitParameters(""));
     }
 
     [Fact]
@@ -297,6 +324,49 @@ public sealed class DocSymbolTests
         Assert.True(NuGetXmlDocumentation.TargetFrameworkScore("net48") > NuGetXmlDocumentation.TargetFrameworkScore("net472"));
         Assert.True(NuGetXmlDocumentation.TargetFrameworkScore("net48") > NuGetXmlDocumentation.TargetFrameworkScore("netstandard2.0"));
         Assert.True(NuGetXmlDocumentation.TargetFrameworkScore("net8.0") > NuGetXmlDocumentation.TargetFrameworkScore("netcoreapp3.1"));
+    }
+
+    [Fact]
+    public void TargetFrameworkScore_tolerates_platform_suffix()
+    {
+        // net8.0-windows 这类带平台后缀的也要按 net8.0 分档
+        Assert.True(NuGetXmlDocumentation.TargetFrameworkScore("net8.0-windows") > NuGetXmlDocumentation.TargetFrameworkScore("net48"));
+        Assert.Equal(
+            NuGetXmlDocumentation.TargetFrameworkScore("net8.0"),
+            NuGetXmlDocumentation.TargetFrameworkScore("net8.0-windows7.0"));
+    }
+
+    [Fact]
+    public void VersionComparer_prefers_release_over_prerelease()
+    {
+        IComparer<string> comparer = NuGetXmlDocumentation.VersionComparer;
+
+        Assert.True(comparer.Compare("1.0.0", "1.0.0-beta") > 0);
+        Assert.True(comparer.Compare("1.10.0", "1.9.0") > 0);
+        Assert.True(comparer.Compare("2.0.0", "1.9.9") > 0);
+    }
+
+    [Fact]
+    public void Query_prefers_exact_type_over_generic_sibling()
+    {
+        // Tuple 与 Tuple`1 这类同名泛型/非泛型类型能同时存在，查裸名要给非泛型的那个
+        IReadOnlyList<DocEntry> entries = ReadXml("""
+            <?xml version="1.0"?>
+            <doc><members>
+              <member name="T:Demo.Tuple"><summary>Non generic.</summary></member>
+              <member name="P:Demo.Tuple.Item"><summary>Non generic member.</summary></member>
+              <member name="T:Demo.Tuple`1"><summary>Generic.</summary></member>
+              <member name="P:Demo.Tuple`1.Item"><summary>Generic member.</summary></member>
+            </members></doc>
+            """);
+
+        DocQueryResult result = DocSymbolQuery.Query(entries, "Demo.Tuple", [], "T");
+
+        Assert.Equal("T:Demo.Tuple", Assert.Single(result.Entries).MemberName);
+
+        // 带反引号写全名时命中泛型那个
+        DocQueryResult generic = DocSymbolQuery.Query(entries, "Demo.Tuple`1", [], "T");
+        Assert.Equal("T:Demo.Tuple`1", Assert.Single(generic.Entries).MemberName);
     }
 
     /// <summary>把一段 XML 写进临时文件再读，用于验证解析/查询细节。</summary>
