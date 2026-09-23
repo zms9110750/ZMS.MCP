@@ -53,6 +53,8 @@ public sealed class ProjectLoaderTests
 
         Assert.Equal(LoadMode.Evaluated, project.Mode);
         Assert.Empty(project.FallbackReason);
+        // 评估模式不该给使用者任何"简化模式"提示
+        Assert.Empty(project.ModeNotice());
     }
 
     [Fact]
@@ -124,6 +126,8 @@ public sealed class ProjectLoaderTests
 
         Assert.Equal(LoadMode.Fallback, loaded.Mode);
         Assert.NotEmpty(loaded.FallbackReason);
+        // 降级必须给出可读提示（不能静默降级，否则使用者会把假错误当真错误）
+        Assert.Contains("简化模式", loaded.ModeNotice());
         // 降级时仍然要能读到源文件（扫目录兜底）
         Assert.Contains(loaded.Info.SourceFiles, file => Path.GetFileName(file) == "Sample.cs");
         Assert.Contains(loaded.Compilation.SyntaxTrees, tree => Path.GetFileName(tree.FilePath) == "Sample.cs");

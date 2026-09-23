@@ -308,21 +308,39 @@ public sealed class LoadedProject
 
     /// <summary>
     /// 加载项目：先问 MSBuild 要"项目的事实"（编译项 / 引用集 / 宏 / 语言选项），拿不到就降级。
-    /// 降级时 <see cref="Mode"/> 为 <see cref="LoadMode.Fallback"/>，调用方应把
-    /// "简化模式，可能有假错误" 一并告诉使用者。
+    ///
+    /// 只有"评估本身"失败才降级 —— 评估成功后装配 compilation 出错属于真问题，照实抛出，
+    /// 否则会把真错误伪装成"简化模式"。降级时用 <see cref="ModeNotice"/> 取提示。
     /// </summary>
+    /// <exception cref="FileNotFoundException">项目文件不存在。</exception>
     public static LoadedProject Load(string projectPath)
     {
         ProjectFileInfo info = ProjectFileInfo.Read(projectPath);
+
+        MsBuildEvaluation evaluation;
         try
         {
-            MsBuildEvaluation evaluation = MsBuildEvaluator.Evaluate(info.ProjectPath);
-            return Evaluated(info, evaluation);
+            evaluation = MsBuildEvaluator.Evaluate(info.ProjectPath);
         }
         catch (Exception exception)
         {
-            return Fallback(info, exception.Message);
+            return Fallback(info, $"{exception.GetType().Name}: {exception.Message}");
         }
+
+        return Evaluated(info, evaluation);
+    }
+
+    /// <summary>
+    /// 加载模式提示：评估模式返回空串；降级时提醒"引用集与宏可能不全，诊断可能夹带假错误"。
+    /// </summary>
+    public string ModeNotice()
+    {
+        if (Mode == LoadMode.Evaluated)
+        {
+            return "";
+        }
+
+        return $"⚠ 简化模式：MSBuild 评估失败（{FallbackReason}）—— 引用集与宏可能不全，诊断可能夹带假错误。";
     }
 
     private static LoadedProject Evaluated(ProjectFileInfo info, MsBuildEvaluation evaluation)
@@ -418,16 +436,21 @@ public sealed class LoadedProject
         }
     }
 
+    /// <summary>
+    /// 语言版本：缺失或不可解析时用 <see cref="LanguageVersion.Default"/>。
+    /// 不能用 Preview —— 那会接受实验语法，把"该报错的代码"放过去（假阴性）。
+    /// </summary>
     private static LanguageVersion ParseLanguageVersion(string value)
     {
-        return LanguageVersionFacts.TryParse(value, out LanguageVersion version) ? version : LanguageVersion.Preview;
+        return LanguageVersionFacts.TryParse(value, out LanguageVersion version) ? version : LanguageVersion.Default;
     }
 
+    /// <summary>可空性：MSBuild 里"没设置"等价于 disable，不是 enable。</summary>
     private static NullableContextOptions ParseNullable(string value)
     {
-        if (string.Equals(value, "disable", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(value, "enable", StringComparison.OrdinalIgnoreCase))
         {
-            return NullableContextOptions.Disable;
+            return NullableContextOptions.Enable;
         }
 
         if (string.Equals(value, "warnings", StringComparison.OrdinalIgnoreCase))
@@ -440,7 +463,7 @@ public sealed class LoadedProject
             return NullableContextOptions.Annotations;
         }
 
-        return NullableContextOptions.Enable;
+        return NullableContextOptions.Disable;
     }
 
     private static string[] SplitSymbols(string value)

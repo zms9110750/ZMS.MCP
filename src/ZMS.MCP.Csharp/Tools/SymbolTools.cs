@@ -26,6 +26,7 @@ public static class SymbolTools
 
             StringBuilder builder = new();
             builder.AppendLine($"# {project.Info.ProjectPath}");
+            AppendModeNotice(builder, project);
             builder.AppendLine($"- TFM: `{project.Info.TargetFramework}` | source files: {project.Info.SourceFiles.Count} | types: {types.Count}");
             builder.AppendLine();
             foreach ((INamedTypeSymbol symbol, string filePath, int line) in types)
@@ -50,6 +51,7 @@ public static class SymbolTools
 
             StringBuilder builder = new();
             builder.AppendLine($"# {SymbolLocator.DisplayName(type)}  ({type.TypeKind.ToString().ToLowerInvariant()})");
+            AppendModeNotice(builder, project);
             builder.AppendLine($"- TFM: `{project.Info.TargetFramework}`");
             builder.AppendLine();
             List<ISymbol> members = type.GetMembers()
@@ -82,13 +84,14 @@ public static class SymbolTools
         {
             LoadedProject project = LoadedProject.Load(projectPath);
             ResolvedPath resolved = SymbolLocator.Resolve(project.Compilation, memberPath);
-            if (string.IsNullOrWhiteSpace(resolved.MemberSpec))
-            {
-                return CodeEditor.Describe(resolved.Type);
-            }
+            string body = string.IsNullOrWhiteSpace(resolved.MemberSpec)
+                ? CodeEditor.Describe(resolved.Type)
+                : CodeEditor.Describe(SymbolLocator.ResolveSingleMember(resolved.Type, resolved.MemberSpec));
 
-            ISymbol symbol = SymbolLocator.ResolveSingleMember(resolved.Type, resolved.MemberSpec);
-            return CodeEditor.Describe(symbol);
+            string notice = project.ModeNotice();
+            return string.IsNullOrEmpty(notice)
+                ? body
+                : notice + Environment.NewLine + Environment.NewLine + body;
         });
     }
 
@@ -145,9 +148,20 @@ public static class SymbolTools
         });
     }
 
+    /// <summary>降级加载时把"简化模式"提示插到输出里（评估模式不插）。</summary>
+    private static void AppendModeNotice(StringBuilder builder, LoadedProject project)
+    {
+        string notice = project.ModeNotice();
+        if (!string.IsNullOrEmpty(notice))
+        {
+            builder.AppendLine(notice);
+        }
+    }
+
     private static string DescribeEdit(LoadedProject project, EditResult result, string target)
     {
         StringBuilder builder = new();
+        AppendModeNotice(builder, project);
         builder.AppendLine($"✅ {result.Action} `{target}`");
         builder.AppendLine($"- File: `{result.FilePath}` ({Relative(project.Info.ProjectDirectory, result.FilePath)})");
         builder.AppendLine($"- Lines: {result.StartLine}-{result.EndLine}");
