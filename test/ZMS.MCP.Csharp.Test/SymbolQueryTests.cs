@@ -190,9 +190,10 @@ public sealed class SymbolQueryTests
             ["string"]);
 
         Assert.NotEmpty(entries);
-        // 只列单参数（string）的方法；类型、属性、字段、命名空间都不该出现
+        // 只列单参数（string）的方法类成员；类型、属性、字段、命名空间都不该出现。
+        // 构造函数参数也是 (string)，所以 method 与 constructor 都算命中。
         Assert.All(entries, entry => Assert.False(entry.IsType));
-        Assert.All(entries, entry => Assert.Equal("method", entry.Kind));
+        Assert.All(entries, entry => Assert.True(entry.Kind is "method" or "constructor", entry.Kind));
         Assert.All(
             entries,
             entry => Assert.Single(((Microsoft.CodeAnalysis.IMethodSymbol)entry.Symbol).Parameters));

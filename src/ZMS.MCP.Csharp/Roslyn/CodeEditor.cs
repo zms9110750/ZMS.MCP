@@ -4,11 +4,17 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Formatting;
 using Microsoft.CodeAnalysis.Host;
+using ZMS.MCP.Csharp.Project;
 
 namespace ZMS.MCP.Csharp.Roslyn;
 
-/// <summary>一次写操作的结果：改动的文件与行号范围。</summary>
+/// <summary>一次已落盘的写操作：改动的文件与行号范围。</summary>
 public sealed record EditResult(string FilePath, int StartLine, int EndLine, string Action);
+
+/// <summary>
+/// 一次**算好但还没写**的代码改动。拟定靠它累积：先算内容，确认之后才落盘。
+/// </summary>
+public sealed record CodeChange(string FilePath, string NewContent, int StartLine, int EndLine, string Action);
 
 /// <summary>基于 Roslyn 语法树的成员查看与编辑（不依赖文件路径定位）。</summary>
 public static class CodeEditor
@@ -55,8 +61,8 @@ public static class CodeEditor
         return builder.ToString();
     }
 
-    /// <summary>整段替换一个成员声明。</summary>
-    public static EditResult ReplaceMember(ISymbol symbol, string newCode, bool format)
+    /// <summary>整段替换一个成员声明（**只算，不写**）。</summary>
+    public static CodeChange ComputeReplace(ISymbol symbol, string newCode, bool format)
     {
         if (string.IsNullOrWhiteSpace(newCode))
         {
@@ -75,11 +81,11 @@ public static class CodeEditor
         SyntaxNode root = node.SyntaxTree.GetRoot();
         SyntaxNode updated = root.ReplaceNode(node, replacement);
         updated = FormatIfNeeded(updated, format);
-        return WriteBack(node.SyntaxTree.FilePath, updated, "replaced");
+        return Compute(node.SyntaxTree.FilePath, updated, "replaced");
     }
 
-    /// <summary>在类型里新增成员，可用 <paramref name="before"/> 指定插到某个已有成员之前。</summary>
-    public static EditResult AddMember(INamedTypeSymbol type, string code, string before, bool format)
+    /// <summary>在类型里新增成员（**只算，不写**），可用 <paramref name="before"/> 指定插到某个已有成员之前。</summary>
+    public static CodeChange ComputeAdd(INamedTypeSymbol type, string code, string before, bool format)
     {
         if (string.IsNullOrWhiteSpace(code))
         {
@@ -118,11 +124,11 @@ public static class CodeEditor
         SyntaxNode root = declaration.SyntaxTree.GetRoot();
         SyntaxNode updated = root.ReplaceNode(declaration, updatedDeclaration);
         updated = FormatIfNeeded(updated, format);
-        return WriteBack(typeNode.SyntaxTree.FilePath, updated, "added");
+        return Compute(typeNode.SyntaxTree.FilePath, updated, "added");
     }
 
-    /// <summary>删除一个成员声明。</summary>
-    public static EditResult RemoveMember(ISymbol symbol, bool format)
+    /// <summary>删除一个成员声明（**只算，不写**）。</summary>
+    public static CodeChange ComputeRemove(ISymbol symbol, bool format)
     {
         SyntaxNode node = SourceNode(symbol)
             ?? throw new InvalidOperationException($"'{symbol.Name}' has no source declaration to remove.");
@@ -131,7 +137,34 @@ public static class CodeEditor
         SyntaxNode? updated = root.RemoveNode(node, SyntaxRemoveOptions.KeepLeadingTrivia)
             ?? throw new InvalidOperationException("Failed to remove the node.");
         updated = FormatIfNeeded(updated, format);
-        return WriteBack(node.SyntaxTree.FilePath, updated, "removed", (span.StartLinePosition.Line + 1, span.EndLinePosition.Line + 1));
+        return Compute(node.SyntaxTree.FilePath, updated, "removed", (span.StartLinePosition.Line + 1, span.EndLinePosition.Line + 1));
+    }
+
+    /// <summary>
+    /// 落盘。写回走「写文件通则」：用**文件原编码**、写临时文件后原子替换。
+    /// </summary>
+    public static EditResult Apply(CodeChange change)
+    {
+        FileWriter.WriteAtomic(change.FilePath, change.NewContent);
+        return new EditResult(change.FilePath, change.StartLine, change.EndLine, change.Action);
+    }
+
+    /// <summary>整段替换一个成员声明。</summary>
+    public static EditResult ReplaceMember(ISymbol symbol, string newCode, bool format)
+    {
+        return Apply(ComputeReplace(symbol, newCode, format));
+    }
+
+    /// <summary>在类型里新增成员，可用 <paramref name="before"/> 指定插到某个已有成员之前。</summary>
+    public static EditResult AddMember(INamedTypeSymbol type, string code, string before, bool format)
+    {
+        return Apply(ComputeAdd(type, code, before, format));
+    }
+
+    /// <summary>删除一个成员声明。</summary>
+    public static EditResult RemoveMember(ISymbol symbol, bool format)
+    {
+        return Apply(ComputeRemove(symbol, format));
     }
 
     /// <summary>成员声明节点对应的源码文本（不带行号，方便直接复制修改）。</summary>
@@ -170,30 +203,31 @@ public static class CodeEditor
         return Formatter.Format(node, workspace);
     }
 
-    private static EditResult WriteBack(string filePath, SyntaxNode root, string action, (int Start, int End)? fallback = null)
+    /// <summary>把改写后的语法树算成一次待落盘改动（行号用锚点定位，锚点丢了就用调用方给的兜底值）。</summary>
+    private static CodeChange Compute(string filePath, SyntaxNode root, string action, (int Start, int End)? fallback = null)
     {
         List<SyntaxNode> targets = root.GetAnnotatedNodes(EditAnchor).ToList();
-        File.WriteAllText(filePath, root.ToFullString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        string content = root.ToFullString();
         if (targets.Count > 0)
         {
             int start = targets.Min(node => node.GetLocation().GetLineSpan().StartLinePosition.Line) + 1;
             int end = targets.Max(node => node.GetLocation().GetLineSpan().EndLinePosition.Line) + 1;
-            return new EditResult(filePath, start, end, action);
+            return new CodeChange(filePath, content, start, end, action);
         }
 
         if (fallback.HasValue)
         {
-            return new EditResult(filePath, fallback.Value.Start, fallback.Value.End, action);
+            return new CodeChange(filePath, content, fallback.Value.Start, fallback.Value.End, action);
         }
 
-        return new EditResult(filePath, 0, 0, action);
+        return new CodeChange(filePath, content, 0, 0, action);
     }
 
     /// <summary>
     /// 把代码片段解析成成员声明列表：包进一个临时类型再取 Members，
     /// 这样「一次传多个成员」「带 XML 注释」「带语法错误」都能得到确定结果。
     /// </summary>
-    private static List<MemberDeclarationSyntax> ParseMembers(string code)
+    internal static List<MemberDeclarationSyntax> ParseMembers(string code)
     {
         if (string.IsNullOrWhiteSpace(code))
         {
