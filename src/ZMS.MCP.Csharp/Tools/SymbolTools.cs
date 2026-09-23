@@ -14,6 +14,70 @@ namespace ZMS.MCP.Csharp.Tools;
 public static class SymbolTools
 {
     [McpServerTool(ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
+    [Description(
+        "List symbols declared in the project's own source (referenced assemblies are excluded). " +
+        "kind = letters from NCSIPFEMD (N namespace, C class, S struct, I interface, P property, F field, E event, M method); " +
+        "T = the three type kinds together; empty = all. " +
+        "modifiers = comma separated 公开/程序集/保护/私有/静态/常量/抽象/只读/虚/覆写 (English also accepted); every given condition must match. " +
+        "argumentTypes = comma separated parameter types; when set, only methods with exactly those parameter types are listed.")]
+    public static string ListSymbols(
+        [Description("Path to the .csproj")] string projectPath,
+        [Description("Kind letters, e.g. 'C' or 'NCSIPFEMD'. Empty = all")] string kind = "",
+        [Description("Modifier filter, e.g. '公开,静态'. Empty = no filter")] string modifiers = "",
+        [Description("Method parameter types, e.g. 'string,int'. Empty = no filter")] string argumentTypes = "")
+    {
+        return ToolGuard.Run(() =>
+        {
+            LoadedProject project = LoadedProject.Load(projectPath);
+            SymbolKinds kinds = SymbolFilterParser.ParseKinds(kind);
+            SymbolModifiers modifierFilter = SymbolFilterParser.ParseModifiers(
+                modifiers.Split([',', ';', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+            IReadOnlyList<string> parameters = SymbolFilterParser.ParseArgumentTypes(argumentTypes);
+
+            IReadOnlyList<SymbolEntry> entries = SymbolQuery.List(project.Compilation, kinds, modifierFilter, parameters);
+
+            StringBuilder builder = new();
+            builder.AppendLine($"# {project.Info.ProjectPath}");
+            AppendModeNotice(builder, project);
+            builder.AppendLine(
+                $"- TFM: `{project.Info.TargetFramework}` | 符号: {entries.Count}" +
+                $" | 过滤: kind='{kind}' modifiers='{modifiers}' args='{argumentTypes}'");
+            if (entries.Count == 0)
+            {
+                builder.AppendLine();
+                builder.AppendLine("_(无匹配符号)_");
+                return builder.ToString();
+            }
+
+            string? currentNamespace = null;
+            bool insideType = false;
+            foreach (SymbolEntry entry in entries)
+            {
+                if (!string.Equals(currentNamespace, entry.Namespace, StringComparison.Ordinal))
+                {
+                    currentNamespace = entry.Namespace;
+                    insideType = false;
+                    builder.AppendLine();
+                    builder.AppendLine($"## {(currentNamespace.Length == 0 ? "(global)" : currentNamespace)}");
+                }
+
+                if (entry.IsType)
+                {
+                    insideType = true;
+                    builder.AppendLine($"- `{entry.Signature}` ({entry.Kind}){Location(project, entry.Symbol)}");
+                    continue;
+                }
+
+                // 成员：缩进一层挂在所属类型下面
+                string indent = insideType ? "  " : "";
+                builder.AppendLine($"{indent}- `{entry.Signature}` ({entry.Kind}){Location(project, entry.Symbol)}");
+            }
+
+            return builder.ToString();
+        });
+    }
+
+    [McpServerTool(ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description("List every type declared in a C# project: fully qualified name, file and line. Use the returned names as typePath for other tools.")]
     public static string ListTypes(
         [Description("Path to the .csproj")] string projectPath,

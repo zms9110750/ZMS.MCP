@@ -221,7 +221,7 @@ public static class SymbolLocator
     }
 
     /// <summary>比较参数类型：支持 C# 关键字别名（string/int/...）、简名与全名。</summary>
-    private static bool TypeMatches(string expected, ITypeSymbol type)
+    internal static bool TypeMatches(string expected, ITypeSymbol type)
     {
         string trimmed = expected.Trim();
         string full = type.ToDisplayString(QualifiedNameFormat);
