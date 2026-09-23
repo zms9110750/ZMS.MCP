@@ -306,7 +306,11 @@ public static class PackageGraph
         return value.ValueKind == JsonValueKind.String ? value.GetString() : value.ToString();
     }
 
-    /// <summary>兜底：直接从 <c>project.assets.json</c> 的 compile 资产里取包。</summary>
+    /// <summary>
+    /// 兜底：从 <c>project.assets.json</c> 取包。
+    /// 只认**真正参与编译**的包（在 targets 里有 compile 资产），
+    /// 否则只被 runtime 引用的包也会被算进"依赖传递包"。
+    /// </summary>
     private static Dictionary<string, string> ReadFromAssets(string assetsPath)
     {
         Dictionary<string, string> result = new(StringComparer.OrdinalIgnoreCase);
@@ -319,10 +323,16 @@ public static class PackageGraph
                 return result;
             }
 
+            HashSet<string> compiled = ReadCompileLibraries(document.RootElement);
             foreach (JsonProperty library in libraries.EnumerateObject())
             {
                 string? type = GetString(library.Value, "type");
-                if (type == null || (!type.Equals("package", StringComparison.OrdinalIgnoreCase)))
+                if (type == null || !type.Equals("package", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (!compiled.Contains(library.Name))
                 {
                     continue;
                 }
@@ -333,6 +343,7 @@ public static class PackageGraph
                     continue;
                 }
 
+                // 同一个包出现多个版本时只留一条（展示用；真实版本仍以还原结果为准）
                 result[library.Name[..slash]] = library.Name[(slash + 1)..];
             }
         }
@@ -342,6 +353,34 @@ public static class PackageGraph
         }
 
         return result;
+    }
+
+    /// <summary>targets 里带 compile 资产的库（形如 <c>Newtonsoft.Json/13.0.3</c>）。</summary>
+    private static HashSet<string> ReadCompileLibraries(JsonElement root)
+    {
+        HashSet<string> compiled = new(StringComparer.OrdinalIgnoreCase);
+        if (!root.TryGetProperty("targets", out JsonElement targets) || targets.ValueKind != JsonValueKind.Object)
+        {
+            return compiled;
+        }
+
+        foreach (JsonProperty target in targets.EnumerateObject())
+        {
+            if (target.Value.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            foreach (JsonProperty library in target.Value.EnumerateObject())
+            {
+                if (library.Value.TryGetProperty("compile", out JsonElement compile) && compile.ValueKind == JsonValueKind.Object)
+                {
+                    compiled.Add(library.Name);
+                }
+            }
+        }
+
+        return compiled;
     }
 
     private sealed record MsBuildSnapshot(string AssetsPath, IReadOnlyList<string> ReferencePaths, Dictionary<string, string> DeclaredVersions)

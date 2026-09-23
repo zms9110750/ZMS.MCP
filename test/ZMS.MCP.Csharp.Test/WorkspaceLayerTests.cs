@@ -335,33 +335,4 @@ public sealed class WorkspaceLayerTests
         Assert.NotEqual(before, FileWriter.ComputeHash(file));
         Assert.Equal("", FileWriter.ComputeHash(Path.Combine(root, "Missing.cs")));
     }
-
-    [Fact]
-    public void WriteBatch_writes_every_file_then_clears_the_journal()
-    {
-        string root = NewTempDirectory();
-        string first = Path.Combine(root, "A.cs");
-        string second = Path.Combine(root, "B.cs");
-        string journal = Path.Combine(root, "journal.txt");
-
-        IReadOnlyList<string> written = FileWriter.WriteBatch(
-            [new KeyValuePair<string, string>(first, "a"), new KeyValuePair<string, string>(second, "b")],
-            journal);
-
-        Assert.Equal([first, second], written);
-        Assert.Equal("a", File.ReadAllText(first));
-        Assert.Equal("b", File.ReadAllText(second));
-        Assert.False(File.Exists(journal));
-    }
-
-    [Fact]
-    public void ReadJournal_returns_pending_targets()
-    {
-        string root = NewTempDirectory();
-        string journal = Path.Combine(root, "journal.txt");
-        File.WriteAllLines(journal, ["self", Path.Combine(root, "A.cs"), Path.Combine(root, "B.cs")]);
-
-        Assert.Equal([Path.Combine(root, "A.cs"), Path.Combine(root, "B.cs")], FileWriter.ReadJournal(journal));
-        Assert.Empty(FileWriter.ReadJournal(Path.Combine(root, "Missing.txt")));
-    }
 }

@@ -55,7 +55,9 @@ public sealed class ComparableVersion : IComparable<ComparableVersion>, IEquatab
         }
 
         int[] numbers = parts
-            .Select(part => int.TryParse(part, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value) ? value : 0)
+            .Select(part => int.TryParse(part, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value)
+                ? value
+                : throw new ArgumentException($"版本号数字段超出范围：{trimmed}"))
             .ToArray();
 
         return new ComparableVersion(trimmed, numbers, releaseLabels);
@@ -156,7 +158,28 @@ public sealed class ComparableVersion : IComparable<ComparableVersion>, IEquatab
 
     public override int GetHashCode()
     {
-        return Original.GetHashCode(StringComparison.Ordinal);
+        // Equals 是按比较结果判等的（1.0 == 1.0.0，1.0.0+meta == 1.0.0），
+        // 所以散列也必须基于规范化后的数字段与标签，不能直接用原始字符串。
+        int significant = Numbers.Length;
+        while (significant > 0 && Numbers[significant - 1] == 0)
+        {
+            significant--;
+        }
+
+        HashCode hash = new();
+        hash.Add(significant);
+        for (int index = 0; index < significant; index++)
+        {
+            hash.Add(Numbers[index]);
+        }
+
+        hash.Add(ReleaseLabels.Length);
+        foreach (string label in ReleaseLabels)
+        {
+            hash.Add(label);
+        }
+
+        return hash.ToHashCode();
     }
 
     public override string ToString()

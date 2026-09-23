@@ -179,8 +179,10 @@ public static class DraftService
         }
 
         store.ClearJournal(record.Cookit);
-        string formatLog = RunFormat(projectPath, targets);
+        // 拟定到这里就算完成了。后面的 format 只是锦上添花：
+        // 它失败也不能把拟定留在「磁盘已改、拟定还在」的卡死状态（重试会被基线校验拦下来）。
         store.Clear(projectPath);
+        string formatLog = RunFormat(projectPath, targets);
 
         builder.AppendLine();
         builder.AppendLine("## 已落盘");

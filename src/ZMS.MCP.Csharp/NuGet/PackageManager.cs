@@ -31,7 +31,7 @@ public static class PackageManager
 
         string fullPath = ProjectViewer.ResolveProjectFile(csprojPath);
         string workingDirectory = Path.GetDirectoryName(fullPath) ?? ".";
-        IReadOnlyDictionary<string, IReadOnlyList<string>> vulnerabilities = VulnerabilityIndex.Load();
+        VulnerabilityIndexData vulnerabilities = VulnerabilityIndex.Load();
 
         Dictionary<string, string> direct = new(StringComparer.OrdinalIgnoreCase);
         List<string> vulnerableDirect = [];
@@ -48,15 +48,16 @@ public static class PackageManager
         }
 
         Dictionary<string, string> graph = BuildGraph(direct, allowPrerelease, vulnerabilities, out List<string> upgraded);
-        List<string> promoted = [];
+
+        // 只引顶级包；传递包与参数要求的版本不一致时把它提升为直接引用（用直接依赖钉住版本）
+        List<string> pinned = [];
         foreach (KeyValuePair<string, string> pair in graph)
         {
-            // 传递依赖的版本和参数要求的不一致 → 提升为直接引用（用直接依赖钉住版本）
             if (direct.TryGetValue(pair.Key, out string? requested))
             {
                 if (requested.Length > 0 && !requested.Equals(pair.Value, StringComparison.OrdinalIgnoreCase))
                 {
-                    pair.ToString();
+                    pinned.Add($"{pair.Key}：参数要 {requested}，依赖图给 {pair.Value}（保留参数要求的版本）");
                 }
 
                 continue;
@@ -64,7 +65,7 @@ public static class PackageManager
 
             if (IsPromotable(pair.Key))
             {
-                promoted.Add(pair.Key);
+                pinned.Add($"{pair.Key} {pair.Value}（传递依赖，版本与参数不一致，提升为直接引用）");
                 direct[pair.Key] = pair.Value;
             }
         }
@@ -89,6 +90,12 @@ public static class PackageManager
         builder.AppendLine();
         builder.AppendLine("# 以下传递引入包原本就存在");
         Append(builder, graph.Keys.Where(name => alreadyPresent.Contains(name, StringComparer.OrdinalIgnoreCase)));
+        if (pinned.Count > 0)
+        {
+            builder.AppendLine();
+            builder.AppendLine("# 版本冲突被钉住的包");
+            Append(builder, pinned);
+        }
 
         builder.AppendLine();
         builder.AppendLine("---");
@@ -177,7 +184,7 @@ public static class PackageManager
         string packageName,
         string requested,
         bool allowPrerelease,
-        IReadOnlyDictionary<string, IReadOnlyList<string>> vulnerabilities)
+        VulnerabilityIndexData vulnerabilities)
     {
         string trimmed = (requested ?? "").Trim();
         bool wantsLatest = trimmed.Length == 0 || trimmed == "*";
@@ -221,11 +228,12 @@ public static class PackageManager
 
     /// <summary>
     /// 自建图：从直接引用出发，按 nuspec 里的依赖一层层展开，只用于**决策与展示**。
-    /// 依赖组按 </summary>
+    /// 依赖组不区分目标框架（本地 nuspec 里各组的依赖会被合并考虑），必要时取版本更高的一条。
+    /// </summary>
     private static Dictionary<string, string> BuildGraph(
         Dictionary<string, string> direct,
         bool allowPrerelease,
-        IReadOnlyDictionary<string, IReadOnlyList<string>> vulnerabilities,
+        VulnerabilityIndexData vulnerabilities,
         out List<string> upgraded)
     {
         Dictionary<string, string> graph = new(direct, StringComparer.OrdinalIgnoreCase);
@@ -274,7 +282,7 @@ public static class PackageManager
         string dependencyId,
         string range,
         bool allowPrerelease,
-        IReadOnlyDictionary<string, IReadOnlyList<string>> vulnerabilities,
+        VulnerabilityIndexData vulnerabilities,
         out bool wasUpgraded)
     {
         wasUpgraded = false;
@@ -288,6 +296,7 @@ public static class PackageManager
         }
         catch (ArgumentException)
         {
+            // 依赖里写的区间读不懂时，放宽成"任意版本"（只是自建图，最终以还原结果为准）
             parsed = VersionRange.Any(allowPrerelease);
         }
 
@@ -298,15 +307,15 @@ public static class PackageManager
             return range.Trim('[', ']', '(', ')').Split(',')[0].Trim();
         }
 
+        pool.Sort();
+        ComparableVersion highest = pool[^1];
         ComparableVersion? safe = VulnerabilityIndex.PickLatestSafe(vulnerabilities, dependencyId, pool);
         if (safe == null)
         {
-            pool.Sort();
-            return pool[^1].Original;
+            // 候选里没有安全版本（或有未知风险）：不乱升级，保留依赖要的最高版本
+            return highest.Original;
         }
 
-        pool.Sort();
-        ComparableVersion highest = pool[^1];
         wasUpgraded = safe.CompareTo(highest) != 0 || VulnerabilityIndex.IsVulnerable(vulnerabilities, dependencyId, highest);
         return safe.Original;
     }

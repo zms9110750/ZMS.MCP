@@ -10,6 +10,17 @@ namespace ZMS.MCP.Csharp.Test;
 /// </summary>
 public sealed class NuGetLayerTests
 {
+    private static VulnerabilityIndexData Index(params (string Package, string[] Ranges)[] entries)
+    {
+        Dictionary<string, IReadOnlyList<string>> affected = new(StringComparer.OrdinalIgnoreCase);
+        foreach ((string package, string[] ranges) in entries)
+        {
+            affected[package] = ranges;
+        }
+
+        return new VulnerabilityIndexData(affected, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+    }
+
     private static string NewTempDirectory()
     {
         string directory = Path.Combine(Path.GetTempPath(), "zms-mcp-nuget-" + Guid.NewGuid().ToString("N"));
@@ -46,6 +57,24 @@ public sealed class NuGetLayerTests
         Assert.True(ComparableVersion.Parse("1.0.0-beta").CompareTo(ComparableVersion.Parse("1.0.0-alpha")) > 0);
         // 数字标签小于字符串标签（SemVer 规则）
         Assert.True(ComparableVersion.Parse("1.0.0-1").CompareTo(ComparableVersion.Parse("1.0.0-alpha")) < 0);
+    }
+
+    [Fact]
+    public void ComparableVersion_hash_agrees_with_equality()
+    {
+        // Equals 是按比较结果判等的，散列必须跟着一致，否则放进 HashSet/Distinct 会自相矛盾
+        Assert.Equal(ComparableVersion.Parse("1.0").GetHashCode(), ComparableVersion.Parse("1.0.0").GetHashCode());
+        Assert.Equal(ComparableVersion.Parse("1.0.0").GetHashCode(), ComparableVersion.Parse("1.0.0+meta").GetHashCode());
+        Assert.NotEqual(ComparableVersion.Parse("1.0.0").GetHashCode(), ComparableVersion.Parse("1.0.1").GetHashCode());
+        Assert.Single(new HashSet<ComparableVersion> { ComparableVersion.Parse("1.0"), ComparableVersion.Parse("1.0.0") });
+    }
+
+    [Fact]
+    public void ComparableVersion_rejects_versions_that_are_not_numbers()
+    {
+        Assert.False(ComparableVersion.TryParse("lib", out _));
+        Assert.False(ComparableVersion.TryParse("", out _));
+        Assert.Throws<ArgumentException>(() => ComparableVersion.Parse("1.notanumber"));
     }
 
     // ───────── 版本区间 ─────────
@@ -128,10 +157,7 @@ public sealed class NuGetLayerTests
     [Fact]
     public void VulnerabilityIndex_matches_affected_version_ranges()
     {
-        Dictionary<string, IReadOnlyList<string>> index = new(StringComparer.OrdinalIgnoreCase)
-        {
-            ["Vulnerable.Package"] = ["[1.0.0, 1.5.0)", "[2.0.0, 2.1.0]"],
-        };
+        VulnerabilityIndexData index = Index(("Vulnerable.Package", ["[1.0.0, 1.5.0)", "[2.0.0, 2.1.0]"]));
 
         Assert.True(VulnerabilityIndex.IsVulnerable(index, "vulnerable.package", ComparableVersion.Parse("1.2.0")));
         Assert.True(VulnerabilityIndex.IsVulnerable(index, "Vulnerable.Package", ComparableVersion.Parse("2.1.0")));
@@ -142,10 +168,7 @@ public sealed class NuGetLayerTests
     [Fact]
     public void VulnerabilityIndex_picks_the_latest_version_that_is_not_vulnerable()
     {
-        Dictionary<string, IReadOnlyList<string>> index = new(StringComparer.OrdinalIgnoreCase)
-        {
-            ["Vulnerable.Package"] = ["[1.0.0, 2.0.0)"],
-        };
+        VulnerabilityIndexData index = Index(("Vulnerable.Package", ["[1.0.0, 2.0.0)"]));
 
         ComparableVersion? picked = VulnerabilityIndex.PickLatestSafe(
             index,
@@ -159,6 +182,29 @@ public sealed class NuGetLayerTests
             index,
             "Vulnerable.Package",
             [ComparableVersion.Parse("1.0.0"), ComparableVersion.Parse("1.9.9")]));
+    }
+
+    [Fact]
+    public void VulnerabilityIndex_treats_unreadable_entries_as_risky_not_safe()
+    {
+        // 索引里有这个包、但区间读不懂：宁可不自动升级，也不能判成"安全"
+        VulnerabilityIndexData index = new(
+            new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase),
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Mystery.Package" });
+
+        Assert.True(VulnerabilityIndex.IsVulnerable(index, "Mystery.Package", ComparableVersion.Parse("1.0.0")));
+        Assert.Null(VulnerabilityIndex.PickLatestSafe(index, "Mystery.Package", [ComparableVersion.Parse("1.0.0")]));
+        // 没提到的包仍然按"没有已知漏洞"处理
+        Assert.False(VulnerabilityIndex.IsVulnerable(index, "Clean.Package", ComparableVersion.Parse("1.0.0")));
+    }
+
+    [Fact]
+    public void VulnerabilityIndex_treats_a_broken_range_as_risky()
+    {
+        // 区间文本坏掉（解析会抛）时，同样不能当成"安全"
+        VulnerabilityIndexData index = Index(("Broken.Package", ["[1.0.0,2.0.0"]));
+
+        Assert.True(VulnerabilityIndex.IsVulnerable(index, "Broken.Package", ComparableVersion.Parse("9.9.9")));
     }
 
     // ───────── 依赖图 ─────────
@@ -178,7 +224,9 @@ public sealed class NuGetLayerTests
     public void PackageGraph_ignores_paths_outside_the_cache_and_too_short_ones()
     {
         Assert.Null(PackageGraph.ParsePackagePath(@"C:\Program Files\dotnet\shared\System.dll", @"X:\dotnet\nuget-packages"));
+        // 第二段不是版本号 → 不是包路径
         Assert.Null(PackageGraph.ParsePackagePath(@"X:\dotnet\nuget-packages\onlypackage\lib\x.dll", @"X:\dotnet\nuget-packages"));
+        Assert.Null(PackageGraph.ParsePackagePath(@"X:\dotnet\nuget-packages\onlypackage\1.0.0", @"X:\dotnet\nuget-packages"));
     }
 
     [Fact]
@@ -216,7 +264,7 @@ public sealed class NuGetLayerTests
         Assert.Empty(PackageGraph.ReadProjectReferences(project));
     }
 
-    // ───────── 包请求解析 ─────────
+    // ───────── 包请求解析与版本选择 ─────────
 
     [Fact]
     public void ParseRequests_splits_name_and_version()
@@ -233,7 +281,11 @@ public sealed class NuGetLayerTests
     [Fact]
     public void ResolveVersion_uses_the_requested_version_when_given()
     {
-        string version = PackageManager.ResolveVersion("microsoft.codeanalysis.csharp", "5.9.0", false, new Dictionary<string, IReadOnlyList<string>>());
+        string version = PackageManager.ResolveVersion(
+            "microsoft.codeanalysis.csharp",
+            "5.9.0",
+            false,
+            VulnerabilityIndexData.Empty);
 
         Assert.Equal("5.9.0", version);
     }
@@ -241,17 +293,13 @@ public sealed class NuGetLayerTests
     [Fact]
     public void ResolveVersion_skips_vulnerable_cached_versions()
     {
-        // 这个包在本地缓存里；把「它自己」全部版本标成受影响，就会退回最后一个候选
+        // 这个包在本地缓存里；把它所有版本标成受影响，就会退回「最高版本」而不是抛异常
         IReadOnlyList<ComparableVersion> cached = NuGetCache.Versions("microsoft.codeanalysis.csharp");
         Assert.NotEmpty(cached);
-        Dictionary<string, IReadOnlyList<string>> index = new(StringComparer.OrdinalIgnoreCase)
-        {
-            ["microsoft.codeanalysis.csharp"] = ["[0.0.0,)"],
-        };
+        VulnerabilityIndexData index = Index(("microsoft.codeanalysis.csharp", ["[0.0.0,)"]));
 
         string version = PackageManager.ResolveVersion("microsoft.codeanalysis.csharp", "", false, index);
 
-        // 全都漏洞时退化为「最高版本」而不是抛异常
         Assert.Equal(cached[0].Original, version);
     }
 
@@ -261,10 +309,7 @@ public sealed class NuGetLayerTests
         IReadOnlyList<ComparableVersion> cached = NuGetCache.Versions("microsoft.codeanalysis.csharp");
         Assert.True(cached.Count >= 2);
         // 把最高的那个版本标成漏洞，应挑第二高的
-        Dictionary<string, IReadOnlyList<string>> index = new(StringComparer.OrdinalIgnoreCase)
-        {
-            ["microsoft.codeanalysis.csharp"] = [$"[{cached[0].Original}]"],
-        };
+        VulnerabilityIndexData index = Index(("microsoft.codeanalysis.csharp", [$"[{cached[0].Original}]"]));
 
         string version = PackageManager.ResolveVersion("microsoft.codeanalysis.csharp", "", false, index);
 

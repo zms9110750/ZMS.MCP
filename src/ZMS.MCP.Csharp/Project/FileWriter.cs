@@ -41,7 +41,6 @@ public static class FileWriter
             return new DetectedEncoding(new UTF8Encoding(false), EncodingSource.NewFile);
         }
 
-        string content = File.ReadAllText(filePath, Encoding.Latin1);
         byte[] bytes = File.ReadAllBytes(filePath);
 
         Encoding? fromEditorConfig = ReadEditorConfigCharset(filePath);
@@ -61,7 +60,6 @@ public static class FileWriter
             return new DetectedEncoding(new UTF8Encoding(false), EncodingSource.StrictUtf8);
         }
 
-        _ = content;
         throw new InvalidOperationException(
             $"无法判定编码，拒绝写入：{filePath}（没有 .editorconfig charset、没有 BOM，也不是合法 UTF-8 字节序列）");
     }
@@ -107,45 +105,6 @@ public static class FileWriter
         string temporary = filePath + ".zms-tmp-" + Guid.NewGuid().ToString("N");
         File.WriteAllText(temporary, content, target.Encoding);
         File.Move(temporary, filePath, overwrite: true);
-    }
-
-    /// <summary>
-    /// 多文件落盘：先把"打算写什么"记进写前日志，再逐个原子写，最后删日志。
-    /// 中途崩溃时日志还在，调用方下次可以前滚补齐（多文件不是真原子）。
-    /// </summary>
-    public static IReadOnlyList<string> WriteBatch(IReadOnlyList<KeyValuePair<string, string>> files, string journalPath)
-    {
-        List<string> written = [];
-        List<string> journal = [journalPath];
-        foreach (KeyValuePair<string, string> file in files)
-        {
-            journal.Add(file.Key);
-        }
-
-        File.WriteAllLines(journalPath, journal, new UTF8Encoding(false));
-
-        foreach (KeyValuePair<string, string> file in files)
-        {
-            WriteAtomic(file.Key, file.Value);
-            written.Add(file.Key);
-        }
-
-        File.Delete(journalPath);
-        return written;
-    }
-
-    /// <summary>读回未完成的写前日志（第一行是日志自身，其余是待写文件）。</summary>
-    public static IReadOnlyList<string> ReadJournal(string journalPath)
-    {
-        if (!File.Exists(journalPath))
-        {
-            return [];
-        }
-
-        return File.ReadAllLines(journalPath, new UTF8Encoding(false))
-            .Where(line => !string.IsNullOrWhiteSpace(line))
-            .Skip(1)
-            .ToList();
     }
 
     /// <summary>
