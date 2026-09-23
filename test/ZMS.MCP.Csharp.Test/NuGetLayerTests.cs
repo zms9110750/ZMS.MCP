@@ -18,7 +18,7 @@ public sealed class NuGetLayerTests
             affected[package] = ranges;
         }
 
-        return new VulnerabilityIndexData(affected, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+        return new VulnerabilityIndexData(affected, new HashSet<string>(StringComparer.OrdinalIgnoreCase), Available: true);
     }
 
     private static string NewTempDirectory()
@@ -190,7 +190,8 @@ public sealed class NuGetLayerTests
         // 索引里有这个包、但区间读不懂：宁可不自动升级，也不能判成"安全"
         VulnerabilityIndexData index = new(
             new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase),
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Mystery.Package" });
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Mystery.Package" },
+            Available: true);
 
         Assert.True(VulnerabilityIndex.IsVulnerable(index, "Mystery.Package", ComparableVersion.Parse("1.0.0")));
         Assert.Null(VulnerabilityIndex.PickLatestSafe(index, "Mystery.Package", [ComparableVersion.Parse("1.0.0")]));
@@ -281,26 +282,29 @@ public sealed class NuGetLayerTests
     [Fact]
     public void ResolveVersion_uses_the_requested_version_when_given()
     {
-        string version = PackageManager.ResolveVersion(
+        PackageManager.VersionChoice choice = PackageManager.ResolveVersion(
             "microsoft.codeanalysis.csharp",
             "5.9.0",
             false,
             VulnerabilityIndexData.Empty);
 
-        Assert.Equal("5.9.0", version);
+        Assert.Equal("5.9.0", choice.Version);
+        Assert.False(choice.Vulnerable);
     }
 
     [Fact]
     public void ResolveVersion_skips_vulnerable_cached_versions()
     {
-        // 这个包在本地缓存里；把它所有版本标成受影响，就会退回「最高版本」而不是抛异常
+        // 这个包在本地缓存里；把它所有版本标成受影响，就会退回「最高版本」并**标成有漏洞**（而不是默默当安全）
         IReadOnlyList<ComparableVersion> cached = NuGetCache.Versions("microsoft.codeanalysis.csharp");
         Assert.NotEmpty(cached);
         VulnerabilityIndexData index = Index(("microsoft.codeanalysis.csharp", ["[0.0.0,)"]));
 
-        string version = PackageManager.ResolveVersion("microsoft.codeanalysis.csharp", "", false, index);
+        PackageManager.VersionChoice choice = PackageManager.ResolveVersion("microsoft.codeanalysis.csharp", "", false, index);
 
-        Assert.Equal(cached[0].Original, version);
+        Assert.Equal(cached[0].Original, choice.Version);
+        Assert.True(choice.Vulnerable);
+        Assert.False(choice.IndexUnavailable);
     }
 
     [Fact]
@@ -311,8 +315,28 @@ public sealed class NuGetLayerTests
         // 把最高的那个版本标成漏洞，应挑第二高的
         VulnerabilityIndexData index = Index(("microsoft.codeanalysis.csharp", [$"[{cached[0].Original}]"]));
 
-        string version = PackageManager.ResolveVersion("microsoft.codeanalysis.csharp", "", false, index);
+        PackageManager.VersionChoice choice = PackageManager.ResolveVersion("microsoft.codeanalysis.csharp", "", false, index);
 
-        Assert.NotEqual(cached[0].Original, version);
+        Assert.NotEqual(cached[0].Original, choice.Version);
+        Assert.False(choice.Vulnerable);
+    }
+
+    [Fact]
+    public void ResolveVersion_reports_an_unavailable_index_instead_of_pretending_it_is_safe()
+    {
+        // 索引拿不到时不能自动升级（PickLatestSafe 直接返回 null），而且要显式说明"没核对过"
+        PackageManager.VersionChoice choice = PackageManager.ResolveVersion(
+            "microsoft.codeanalysis.csharp",
+            "",
+            false,
+            VulnerabilityIndexData.Unavailable);
+
+        Assert.NotEmpty(choice.Version);
+        Assert.True(choice.IndexUnavailable);
+        Assert.False(choice.Vulnerable);
+        Assert.Null(VulnerabilityIndex.PickLatestSafe(
+            VulnerabilityIndexData.Unavailable,
+            "microsoft.codeanalysis.csharp",
+            NuGetCache.Versions("microsoft.codeanalysis.csharp")));
     }
 }

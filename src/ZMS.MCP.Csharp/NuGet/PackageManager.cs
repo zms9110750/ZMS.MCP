@@ -37,35 +37,38 @@ public static class PackageManager
         List<string> vulnerableDirect = [];
         foreach (PackageRequest request in requests)
         {
-            string version = ResolveVersion(request.Name, request.Version, allowPrerelease, vulnerabilities);
-            direct[request.Name] = version;
-            if (ComparableVersion.TryParse(version, out ComparableVersion? parsed)
-                && parsed != null
-                && VulnerabilityIndex.IsVulnerable(vulnerabilities, request.Name, parsed))
+            VersionChoice choice = ResolveVersion(request.Name, request.Version, allowPrerelease, vulnerabilities);
+            direct[request.Name] = choice.Version;
+            if (choice.Vulnerable)
             {
-                vulnerableDirect.Add($"{request.Name} {version}");
+                vulnerableDirect.Add($"{request.Name} {choice.Version}");
+            }
+            else if (choice.IndexUnavailable)
+            {
+                // 索引没拿到：这个版本没做过漏洞核对，必须让人看见，不能默默当"安全"
+                vulnerableDirect.Add($"{request.Name} {choice.Version}（漏洞索引不可用，未经核对）");
             }
         }
 
         Dictionary<string, string> graph = BuildGraph(direct, allowPrerelease, vulnerabilities, out List<string> upgraded);
 
-        // 只引顶级包；传递包与参数要求的版本不一致时把它提升为直接引用（用直接依赖钉住版本）
+        // 只对顶级包进行引入（= 调用方要的那几个）。传递包不单独引入，最终版本以真实还原结果为准；
+        // 只有当依赖图要求的版本**比参数更高**时，才把参数版本抬上去（否则还原会降级失败）。
         List<string> pinned = [];
         foreach (KeyValuePair<string, string> pair in graph)
         {
-            if (direct.TryGetValue(pair.Key, out string? requested))
+            if (!direct.TryGetValue(pair.Key, out string? requested) || requested.Length == 0)
             {
-                if (requested.Length > 0 && !requested.Equals(pair.Value, StringComparison.OrdinalIgnoreCase))
-                {
-                    pinned.Add($"{pair.Key}：参数要 {requested}，依赖图给 {pair.Value}（保留参数要求的版本）");
-                }
-
                 continue;
             }
 
-            if (IsPromotable(pair.Key))
+            if (ComparableVersion.TryParse(requested, out ComparableVersion? requestedVersion)
+                && requestedVersion != null
+                && ComparableVersion.TryParse(pair.Value, out ComparableVersion? graphVersion)
+                && graphVersion != null
+                && graphVersion.CompareTo(requestedVersion) > 0)
             {
-                pinned.Add($"{pair.Key} {pair.Value}（传递依赖，版本与参数不一致，提升为直接引用）");
+                pinned.Add($"{pair.Key}：参数要 {requested}，依赖图要 {pair.Value} → 采用 {pair.Value}");
                 direct[pair.Key] = pair.Value;
             }
         }
@@ -176,11 +179,14 @@ public static class PackageManager
         return builder.ToString();
     }
 
+    /// <summary>选版本的结果：版本号 + 是否已知有漏洞 + 是否因为索引不可用而没核对过。</summary>
+    internal sealed record VersionChoice(string Version, bool Vulnerable, bool IndexUnavailable);
+
     /// <summary>
     /// 选版本：显式给了就用它（<c>*</c> 表示要最新的）；没给就先用本地缓存最新，
     /// 本地没有这个包再去看线上；最后过一遍漏洞索引，有漏洞就换成最新安全版。
     /// </summary>
-    internal static string ResolveVersion(
+    internal static VersionChoice ResolveVersion(
         string packageName,
         string requested,
         bool allowPrerelease,
@@ -190,7 +196,11 @@ public static class PackageManager
         bool wantsLatest = trimmed.Length == 0 || trimmed == "*";
         if (!wantsLatest)
         {
-            return trimmed.TrimStart('^', '~');
+            string explicitVersion = trimmed.TrimStart('^', '~');
+            bool vulnerable = ComparableVersion.TryParse(explicitVersion, out ComparableVersion? parsed)
+                && parsed != null
+                && VulnerabilityIndex.IsVulnerable(vulnerabilities, packageName, parsed);
+            return new VersionChoice(explicitVersion, vulnerable, IndexUnavailable: !vulnerabilities.Available);
         }
 
         List<ComparableVersion> local = [.. NuGetCache.Versions(packageName)];
@@ -219,11 +229,16 @@ public static class PackageManager
         ComparableVersion? safe = VulnerabilityIndex.PickLatestSafe(vulnerabilities, packageName, local);
         if (safe != null)
         {
-            return safe.Original;
+            return new VersionChoice(safe.Original, Vulnerable: false, IndexUnavailable: false);
         }
 
+        // 没有安全版本（或索引拿不到）：不擅自声称"这是安全的" ——
+        // 让调用方把它列进「有漏洞」一栏，索引不可用时至少也要提示"没核对过"。
         local.Sort();
-        return local[^1].Original;
+        return new VersionChoice(
+            local[^1].Original,
+            Vulnerable: vulnerabilities.Available,
+            IndexUnavailable: !vulnerabilities.Available);
     }
 
     /// <summary>
@@ -349,14 +364,6 @@ public static class PackageManager
 
             yield return (id, dependency.Attribute("version")?.Value ?? "");
         }
-    }
-
-    /// <summary>只提升真正的主包：SDK/分析器/构建包会改变项目行为，不自动加进 csproj。</summary>
-    private static bool IsPromotable(string packageName)
-    {
-        return !packageName.EndsWith(".sdk", StringComparison.OrdinalIgnoreCase)
-            && !packageName.Contains("analyzers", StringComparison.OrdinalIgnoreCase)
-            && !packageName.Contains("build", StringComparison.OrdinalIgnoreCase);
     }
 
     private static void Append(StringBuilder builder, IEnumerable<string> lines)
