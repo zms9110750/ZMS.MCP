@@ -32,12 +32,25 @@ public static class DraftPlanner
         Dictionary<string, PlannedFileBuilder> files = new(StringComparer.OrdinalIgnoreCase);
         List<string> missing = [];
 
+        // **定向**判断"原本存在的符号现在还找得到吗"：不建全量符号基线
+        // （那是 O(拟定条数 × 项目符号数)，大项目上会把 confirm_draft 拖慢）
+        static bool CanStillLocate(DraftEdit edit, CSharpCompilation compilation)
+        {
+            INamedTypeSymbol? type = SymbolLocator.FindType(compilation, edit.TypePath);
+            if (type == null)
+            {
+                return false;
+            }
+
+            return edit.MemberName.Length == 0 || SymbolLocator.FindMembers(type, edit.MemberName).Count > 0;
+        }
+
         foreach (DraftEdit edit in edits.OrderBy(item => item.Sequence))
         {
-            // 原本就存在的符号必须**现在还找得到**，否则这条拟定作废（窗口期被改名/删除/移动后找不到）
+            // 原本就存在的符号必须**现在还找得到**，否则这条拟定作废（窗口期被改名/删除后找不到）
             if (edit.SymbolKey.Length > 0
                 && edit.SymbolSnapshot.Length > 0
-                && !SymbolBaseline.Capture(compilation).ContainsKey(edit.SymbolKey))
+                && !CanStillLocate(edit, compilation))
             {
                 missing.Add(edit.SymbolKey);
                 continue;

@@ -617,16 +617,45 @@ public static class DraftService
 
         // 落盘事务：写前日志 → 原子写 → 清日志 → 清拟定与许可 → format → 整体重算基线
         store.RecordJournal(record.Cookit, entries);
-        foreach (KeyValuePair<string, string> file in files)
+
+        // 写：内容没变的文件会被跳过（不搅动时间戳），如实报出来
+        List<string> skipped = [];
+        foreach (DraftStore.JournalEntry entry in entries)
         {
-            FileWriter.WriteAtomic(file.Key, file.Value);
+            if (!FileWriter.WriteAtomic(entry.FilePath, entry.NewContent))
+            {
+                skipped.Add(entry.FilePath);
+            }
+        }
+
+        MsBuildEvaluator.ClearCache();
+
+        // format 在**清理之前**：失败就保留拟定与写前日志（可直接重试），并如实报出它额外改了什么
+        Dictionary<string, string> beforeFormat = files.ToDictionary(
+            file => file.Key,
+            file => FileWriter.ComputeHash(file.Key),
+            StringComparer.OrdinalIgnoreCase);
+        (bool formatted, string formatLog) = RunFormat(projectPath, [.. files.Select(file => file.Key)]);
+        List<string> reformatted =
+        [
+            .. files
+                .Select(file => file.Key)
+                .Where(path => !string.Equals(beforeFormat[path], FileWriter.ComputeHash(path), StringComparison.OrdinalIgnoreCase)),
+        ];
+
+        if (!formatted)
+        {
+            StringBuilder failure = new();
+            failure.AppendLine("# 落盘未完成（文件已写入，但格式化失败）");
+            failure.AppendLine($"- 已写入 {files.Count} 个文件：{string.Join("、", files.Select(file => file.Key))}");
+            failure.AppendLine($"- {formatLog}");
+            failure.AppendLine("- 拟定与写前日志**已保留**：处理完之后重新 confirm_draft（不带 cookie）预检即可重试。");
+            return failure.ToString();
         }
 
         store.ClearJournal(record.Cookit);
         store.Clear(projectPath);
         PermitStore.Invalidate(projectPath);
-        MsBuildEvaluator.ClearCache();
-        string formatLog = RunFormat(projectPath, [.. files.Select(file => file.Key)]);
         RefreshBaseline(projectPath);
 
         StringBuilder builder = new();
@@ -635,11 +664,16 @@ public static class DraftService
         builder.AppendLine("## 已落盘");
         foreach (KeyValuePair<string, string> file in files)
         {
-            builder.AppendLine($"- {file.Key}");
+            builder.AppendLine(skipped.Contains(file.Key, StringComparer.OrdinalIgnoreCase)
+                ? $"- {file.Key}（内容未变，跳过）"
+                : $"- {file.Key}");
         }
 
         builder.AppendLine("- 编码：按各文件原编码写回（新建文件 UTF-8 无 BOM）");
         builder.AppendLine($"- 格式化：{formatLog}");
+        builder.AppendLine(reformatted.Count == 0
+            ? "- format 额外改动：无"
+            : $"- format 额外改动：{string.Join("、", reformatted)}（hash 变化）");
         builder.AppendLine("- 追踪继续，基线已按落盘后的现状整体重算。");
         builder.AppendLine("- 未做任何 git 操作（提交/分支/贮藏都不动）");
         return builder.ToString();
@@ -1016,12 +1050,6 @@ public static class DraftService
             || token.IsKind(SyntaxKind.InternalKeyword);
     }
 
-    private static string BaselineHash(DraftRecord record, string filePath)
-    {
-        DraftEdit? existing = record.Edits.FirstOrDefault(edit => edit.FilePath.Equals(filePath, StringComparison.OrdinalIgnoreCase));
-        return existing != null ? existing.BaselineHash : FileWriter.ComputeHash(filePath);
-    }
-
     internal static DiagnosticSnapshot Analyze(Compilation compilation)
     {
         List<DiagnosticKey> errors = [];
@@ -1086,11 +1114,12 @@ public static class DraftService
         }
     }
 
-    private static string RunFormat(string projectPath, IReadOnlyList<string> files)
+    /// <summary>跑 dotnet format；返回「是否成功」与给 agent 看的说明（失败不抛，交给调用方决定保留拟定）。</summary>
+    private static (bool Succeeded, string Log) RunFormat(string projectPath, IReadOnlyList<string> files)
     {
         if (files.Count == 0)
         {
-            return "（没有文件需要格式化）";
+            return (true, "（没有文件需要格式化）");
         }
 
         List<string> arguments = ["format", projectPath, "--no-restore", "--include"];
@@ -1099,12 +1128,12 @@ public static class DraftService
         {
             CommandResult result = CommandRunner.Run("dotnet", arguments, Path.GetDirectoryName(projectPath) ?? ".", 300);
             return result.Succeeded
-                ? "已对本次改动的文件跑 dotnet format"
-                : $"dotnet format 未成功（退出码 {result.ExitCode}）：{FirstLine(result.Output)}";
+                ? (true, "已对本次改动的文件跑 dotnet format")
+                : (false, $"dotnet format 未成功（退出码 {result.ExitCode}）：{FirstLine(result.Output)}");
         }
         catch (Exception exception) when (exception is TimeoutException or System.ComponentModel.Win32Exception)
         {
-            return $"dotnet format 未执行：{exception.Message}";
+            return (false, $"dotnet format 未执行：{exception.Message}");
         }
     }
 
