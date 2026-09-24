@@ -117,7 +117,6 @@ public static class DraftService
         return "# 前滚：处理上次未写完的落盘" + Environment.NewLine + string.Join(Environment.NewLine, messages);
     }
 
-    /// <summary>拟定：先做语法检查，通过才记进拟定；<paramref name="content"/> 为 null 表示删除成员。</summary>
     /// <summary>
     /// 拟定编辑（`docs/Csharp-拟定流程v3.md` 第三节 2）：**只记符号 + 意图 + 首次快照**，
     /// 不算文件路径、不算整文件内容（那些留到预检/落盘现场做）；同一符号只保留一条生效条目。
