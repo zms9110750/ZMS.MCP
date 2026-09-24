@@ -96,15 +96,13 @@ public sealed class DraftStore
         command.Parameters.AddWithValue("$type", typePath);
         command.Parameters.AddWithValue("$member", memberName);
         command.Parameters.AddWithValue("$content", requestedContent == null ? DBNull.Value : requestedContent);
-        command.Parameters.AddWithValue("$file", filePath);
-        command.Parameters.AddWithValue("$hash", baselineHash);
-        command.Parameters.AddWithValue("$result", resultContent);
         command.Parameters.AddWithValue("$action", action);
         command.Parameters.AddWithValue("$symbol", symbolKey);
         command.Parameters.AddWithValue("$snapshot", symbolSnapshot);
         long id = Convert.ToInt64(command.ExecuteScalar());
 
-        return new DraftEdit(id, sequence, typePath, memberName, requestedContent, filePath, baselineHash, resultContent, action, symbolKey, symbolSnapshot);
+        // filePath / baselineHash / resultContent 是旧列时代的形参：值已不再落库（这三个列也已删掉），字段恒空
+        return new DraftEdit(id, sequence, typePath, memberName, requestedContent, "", "", "", action, symbolKey, symbolSnapshot);
     }
 
     /// <summary>
@@ -166,9 +164,6 @@ public sealed class DraftStore
             insert.Parameters.AddWithValue("$type", typePath);
             insert.Parameters.AddWithValue("$member", memberName);
             insert.Parameters.AddWithValue("$content", requestedContent == null ? DBNull.Value : requestedContent);
-            insert.Parameters.AddWithValue("$file", "");
-            insert.Parameters.AddWithValue("$hash", "");
-            insert.Parameters.AddWithValue("$result", "");
             insert.Parameters.AddWithValue("$action", action);
             insert.Parameters.AddWithValue("$symbol", symbolKey);
             insert.Parameters.AddWithValue("$snapshot", snapshot);
@@ -202,8 +197,8 @@ public sealed class DraftStore
     /// <summary>拟定条目的 INSERT（`Append` 与 `ReplaceSymbol` 共用，保证两处列与参数一致）。</summary>
     private const string InsertSql =
         """
-        INSERT INTO draft_edits (project_path, seq, type_path, member_name, content, file_path, baseline_hash, result_content, action, symbol_key, symbol_snapshot)
-        VALUES ($project, $seq, $type, $member, $content, $file, $hash, $result, $action, $symbol, $snapshot);
+        INSERT INTO draft_edits (project_path, seq, type_path, member_name, content, action, symbol_key, symbol_snapshot)
+        VALUES ($project, $seq, $type, $member, $content, $action, $symbol, $snapshot);
         SELECT last_insert_rowid();
         """;
 
@@ -389,6 +384,17 @@ public sealed class DraftStore
         return entries;
     }
 
+    /// <summary>删掉某个项目名下拟定对应的写前日志（清除追踪时用；调用方已先试过前滚）。</summary>
+    public int ClearJournalsForProject(string projectPath)
+    {
+        using SqliteConnection connection = Open();
+        using SqliteCommand command = connection.CreateCommand();
+        command.CommandText =
+            "DELETE FROM write_journal WHERE cookit IN (SELECT cookit FROM drafts WHERE project_path = $project);";
+        command.Parameters.AddWithValue("$project", Normalize(projectPath));
+        return command.ExecuteNonQuery();
+    }
+
     /// <summary>清理写前日志（落盘完成后调用）。</summary>
     public void ClearJournal(string cookit)
     {
@@ -449,22 +455,23 @@ public sealed class DraftStore
                 created_at   TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS draft_edits (
-                id             INTEGER PRIMARY KEY AUTOINCREMENT,
-                project_path   TEXT NOT NULL,
-                seq            INTEGER NOT NULL,
-                type_path      TEXT NOT NULL,
-                member_name    TEXT NOT NULL,
-                content        TEXT NULL,
-                file_path      TEXT NOT NULL,
-                baseline_hash  TEXT NOT NULL,
-                result_content TEXT NOT NULL,
-                action         TEXT NOT NULL
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_path    TEXT NOT NULL,
+                seq             INTEGER NOT NULL,
+                type_path       TEXT NOT NULL,
+                member_name     TEXT NOT NULL,
+                content         TEXT NULL,
+                action          TEXT NOT NULL,
+                symbol_key      TEXT NOT NULL DEFAULT '',
+                symbol_snapshot TEXT NULL
             );
             CREATE TABLE IF NOT EXISTS write_journal (
-                cookit    TEXT NOT NULL,
-                seq       INTEGER NOT NULL,
-                file_path TEXT NOT NULL,
-                content   TEXT NOT NULL
+                cookit        TEXT NOT NULL,
+                seq           INTEGER NOT NULL,
+                file_path     TEXT NOT NULL,
+                content       TEXT NOT NULL,
+                previous_hash TEXT NOT NULL DEFAULT '',
+                encoding      TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS trackings (
                 project_path    TEXT PRIMARY KEY,
@@ -480,28 +487,80 @@ public sealed class DraftStore
         EnsureColumn(connection, "draft_edits", "symbol_key", "TEXT NOT NULL DEFAULT ''");
         EnsureColumn(connection, "write_journal", "previous_hash", "TEXT NOT NULL DEFAULT ''");
         EnsureColumn(connection, "write_journal", "encoding", "TEXT NOT NULL DEFAULT ''");
+
+        // 旧库去列：拟定只存"符号 + 意图"，file_path / baseline_hash / result_content 已废弃
+        DropLegacyDraftEditColumns(connection);
         return connection;
     }
 
     /// <summary>旧库补列：缺了才 <c>ALTER TABLE</c>，已经有了就直接返回。</summary>
     private static void EnsureColumn(SqliteConnection connection, string table, string column, string definition)
     {
-        using (SqliteCommand pragma = connection.CreateCommand())
+        if (HasColumn(connection, table, column))
         {
-            pragma.CommandText = $"PRAGMA table_info({table});";
-            using SqliteDataReader reader = pragma.ExecuteReader();
-            while (reader.Read())
-            {
-                if (string.Equals(reader.GetString(1), column, StringComparison.OrdinalIgnoreCase))
-                {
-                    return;
-                }
-            }
+            return;
         }
 
         using SqliteCommand alter = connection.CreateCommand();
         alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition};";
         alter.ExecuteNonQuery();
+    }
+
+    private static bool HasColumn(SqliteConnection connection, string table, string column)
+    {
+        using SqliteCommand pragma = connection.CreateCommand();
+        pragma.CommandText = $"PRAGMA table_info({table});";
+        using SqliteDataReader reader = pragma.ExecuteReader();
+        while (reader.Read())
+        {
+            if (string.Equals(reader.GetString(1), column, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// 旧库迁移：把 <c>draft_edits</c> 里已废弃的 <c>file_path</c> / <c>baseline_hash</c> /
+    /// <c>result_content</c> 三列**物理去掉**（sqlite 不一定支持 DROP COLUMN，所以走"建新表 → 搬数据 → 换名"）。
+    /// </summary>
+    private static void DropLegacyDraftEditColumns(SqliteConnection connection)
+    {
+        if (!HasColumn(connection, "draft_edits", "file_path"))
+        {
+            return;
+        }
+
+        using SqliteTransaction transaction = connection.BeginTransaction();
+        using (SqliteCommand rebuild = connection.CreateCommand())
+        {
+            rebuild.Transaction = transaction;
+            rebuild.CommandText =
+                """
+                CREATE TABLE draft_edits_rebuilt (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_path    TEXT NOT NULL,
+                    seq             INTEGER NOT NULL,
+                    type_path       TEXT NOT NULL,
+                    member_name     TEXT NOT NULL,
+                    content         TEXT NULL,
+                    action          TEXT NOT NULL,
+                    symbol_key      TEXT NOT NULL DEFAULT '',
+                    symbol_snapshot TEXT NULL
+                );
+                INSERT INTO draft_edits_rebuilt (id, project_path, seq, type_path, member_name, content, action, symbol_key, symbol_snapshot)
+                SELECT id, project_path, seq, type_path, member_name, content, action,
+                       ifnull(symbol_key, ''), symbol_snapshot
+                FROM draft_edits;
+                DROP TABLE draft_edits;
+                ALTER TABLE draft_edits_rebuilt RENAME TO draft_edits;
+                """;
+            rebuild.ExecuteNonQuery();
+        }
+
+        transaction.Commit();
     }
 
     private static DraftRecord? Read(SqliteConnection connection, string projectPath)
@@ -523,7 +582,7 @@ public sealed class DraftStore
             using SqliteCommand edits = connection.CreateCommand();
             edits.CommandText =
                 """
-                SELECT id, seq, type_path, member_name, content, file_path, baseline_hash, result_content, action, symbol_key, symbol_snapshot
+                SELECT id, seq, type_path, member_name, content, action, symbol_key, symbol_snapshot
                 FROM draft_edits WHERE project_path = $project ORDER BY seq;
                 """;
             edits.Parameters.AddWithValue("$project", projectPath);
@@ -537,12 +596,12 @@ public sealed class DraftStore
                     editReader.GetString(2),
                     editReader.GetString(3),
                     editReader.IsDBNull(4) ? null : editReader.GetString(4),
+                    "",
+                    "",
+                    "",
                     editReader.GetString(5),
-                    editReader.GetString(6),
-                    editReader.GetString(7),
-                    editReader.GetString(8),
-                    editReader.IsDBNull(9) ? "" : editReader.GetString(9),
-                    editReader.IsDBNull(10) ? "" : editReader.GetString(10)));
+                    editReader.IsDBNull(6) ? "" : editReader.GetString(6),
+                    editReader.IsDBNull(7) ? "" : editReader.GetString(7)));
             }
 
             return new DraftRecord(projectPath, cookit, createdAt, list);

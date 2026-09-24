@@ -71,12 +71,21 @@ public static class TrackingService
         }
 
         int draftCount = store.Find(projectPath)?.Edits.Count ?? 0;
+
+        // 前滚可能刻意**保留**日志（文件被人手改过 → 不敢覆盖）。既然用户明确要清除这个项目的一切，
+        // 就在这里把它们一并删掉并报出条数 —— 否则它们会每次启动重复报告，永远没有出口。
+        int discarded = store.HasPendingJournal(projectPath) ? store.ClearJournalsForProject(projectPath) : 0;
+
         store.ClearTracking(projectPath);
         // 内存里的两张许可表也要清（计划 §三.6）：否则 untrack 之后旧的 applyCookie 还能越过
         // "每次落盘前必须先预检"这道闸（落盘内容仍来自现场计算，但闸门语义被破坏）
         PermitStore.Invalidate(projectPath);
         builder.AppendLine($"- 项目：{projectPath}");
         builder.AppendLine($"- 已删除拟定：{draftCount} 条");
+        if (discarded > 0)
+        {
+            builder.AppendLine($"- 同时丢弃 {discarded} 条未处理的写前日志（前滚时发现文件被手改过，之前一直保留着）");
+        }
         builder.AppendLine("- 追踪快照已删除；要再写这个项目，请重新 track_project。");
         return builder.ToString();
     }

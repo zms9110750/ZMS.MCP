@@ -45,15 +45,16 @@ public sealed class DraftLayerTests
         Assert.Equal(first.Cookit, again.Cookit);
         Assert.True(Guid.TryParse(first.Cookit, out _));
 
-        store.Append(project, "Demo.A", "Run", "void Run() { }", file, "hash_original", "content1", "modified");
-        store.Append(project, "Demo.A", "Stop", "void Stop() { }", file, "hash_original", "content2", "modified");
+        store.Append(project, "Demo.A", "Run", "void Run() { }", file, "hash_original", "content1", "modified", "Demo.A.Run()", "snapshot1");
+        store.Append(project, "Demo.A", "Stop", "void Stop() { }", file, "hash_original", "content2", "modified", "Demo.A.Stop()", "snapshot2");
 
         DraftRecord? record = store.Find(project);
         Assert.NotNull(record);
         Assert.Equal([1, 2], record!.Edits.Select(edit => edit.Sequence));
-        Assert.Equal("content2", record.Edits[1].ResultContent);
-        // 同一文件的两条编辑共用最初那份基线 hash
-        Assert.All(record.Edits, edit => Assert.Equal("hash_original", edit.BaselineHash));
+        // 拟定只记「符号 + 意图 + 首次快照」：file_path / baseline_hash / result_content 三个旧列已删掉，字段恒空
+        Assert.Equal("Demo.A.Stop()", record.Edits[1].SymbolKey);
+        Assert.Equal("snapshot2", record.Edits[1].SymbolSnapshot);
+        Assert.All(record.Edits, edit => Assert.Equal("", edit.ResultContent));
         Assert.All(record.Edits, edit => Assert.False(edit.IsDelete));
     }
 
