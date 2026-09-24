@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using ZMS.MCP.Csharp.Project;
 
@@ -17,6 +18,9 @@ public static class PackageManager
 {
     /// <summary>依赖图递归的最大深度（防环 + 防呆）。</summary>
     private const int MaxGraphDepth = 24;
+
+    /// <summary>NuGet 漏洞审计的警告码：NU1901–NU1904。</summary>
+    private static readonly Regex AuditWarningRegex = new("NU190[1-4]", RegexOptions.Compiled);
 
     public static string Install(
         string csprojPath,
@@ -52,6 +56,25 @@ public static class PackageManager
 
         Dictionary<string, string> graph = BuildGraph(direct, allowPrerelease, vulnerabilities, out List<string> upgraded);
 
+        // 参数里要了、但被**别的参数包**的依赖传递满足的包：这一包不直接引入。
+        // （需求：只有出现在参数里的包才可能进「因为被引用而未直接引入」这一类）
+        Dictionary<string, HashSet<string>> introducedBy = BuildIntroductions(direct, allowPrerelease, vulnerabilities);
+        List<string> coveredByOthers = [];
+        foreach (string name in direct.Keys.ToList())
+        {
+            bool covered = introducedBy.Any(pair =>
+                !pair.Key.Equals(name, StringComparison.OrdinalIgnoreCase)
+                && pair.Value.Contains(name)
+                && VersionSatisfied(graph, direct, name));
+            if (covered)
+            {
+                coveredByOthers.Add(name);
+                direct.Remove(name);
+            }
+        }
+
+        coveredByOthers.Sort(StringComparer.OrdinalIgnoreCase);
+
         // 只对顶级包进行引入（= 调用方要的那几个）。传递包不单独引入，最终版本以真实还原结果为准；
         // 只有当依赖图要求的版本**比参数更高**时，才把参数版本抬上去（否则还原会降级失败）。
         List<string> pinned = [];
@@ -83,16 +106,21 @@ public static class PackageManager
         Append(builder, direct.Select(pair => pair.Key + (pair.Value.Length == 0 ? "" : " " + pair.Value)));
         builder.AppendLine();
         builder.AppendLine("# 以下包因为被引用而未直接引入");
-        Append(builder, graph.Keys.Where(name => !direct.ContainsKey(name)));
+        Append(builder, coveredByOthers);
         builder.AppendLine();
         builder.AppendLine("# 以下包因为漏洞被自动升级引入");
         Append(builder, upgraded);
         builder.AppendLine();
         builder.AppendLine("# 以下包被本次传递引入");
-        Append(builder, graph.Keys.Where(name => !direct.ContainsKey(name) && !alreadyPresent.Contains(name, StringComparer.OrdinalIgnoreCase)));
+        Append(builder, graph.Keys.Where(name =>
+            !direct.ContainsKey(name)
+            && !coveredByOthers.Contains(name, StringComparer.OrdinalIgnoreCase)
+            && !alreadyPresent.Contains(name, StringComparer.OrdinalIgnoreCase)));
         builder.AppendLine();
         builder.AppendLine("# 以下传递引入包原本就存在");
-        Append(builder, graph.Keys.Where(name => alreadyPresent.Contains(name, StringComparer.OrdinalIgnoreCase)));
+        Append(builder, graph.Keys.Where(name =>
+            !coveredByOthers.Contains(name, StringComparer.OrdinalIgnoreCase)
+            && alreadyPresent.Contains(name, StringComparer.OrdinalIgnoreCase)));
         if (pinned.Count > 0)
         {
             builder.AppendLine();
@@ -130,8 +158,14 @@ public static class PackageManager
         {
             builder.AppendLine();
             builder.AppendLine("（预演，未真正执行。）");
+            return builder.ToString();
         }
 
+        // 索引有滞后：落盘后再用 restore 的漏洞审计（NU1901–NU1904）核一遍。
+        // 传递依赖要覆盖就得带 NuGetAuditMode=all —— 文档说"这一步不能省"。
+        builder.AppendLine();
+        builder.AppendLine("## 落盘后核对（NU1901–NU1904，NuGetAuditMode=all）");
+        AppendAudit(builder, fullPath, workingDirectory);
         return builder.ToString();
     }
 
@@ -168,7 +202,11 @@ public static class PackageManager
         Append(builder, packageNames);
         builder.AppendLine();
         builder.AppendLine("# 本次移除的依赖传递包");
-        Append(builder, beforeNames.Where(name => !afterNames.Contains(name)).OrderBy(name => name, StringComparer.OrdinalIgnoreCase));
+        // 被直接移除的顶级包已经列在「本次移除包」里，不再重复出现在这里（间接移除就是间接移除）
+        HashSet<string> removedDirectly = new(packageNames, StringComparer.OrdinalIgnoreCase);
+        Append(builder, beforeNames
+            .Where(name => !afterNames.Contains(name) && !removedDirectly.Contains(name))
+            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase));
 
         if (dryRun)
         {
@@ -293,6 +331,71 @@ public static class PackageManager
         return graph;
     }
 
+    /// <summary>
+    /// 每个参数包的依赖闭包（不含它自己）。用来判断"参数里要了、但被别的参数包带进来"的包 ——
+    /// 那些包不直接引入，归入「因为被引用而未直接引入」。
+    /// </summary>
+    private static Dictionary<string, HashSet<string>> BuildIntroductions(
+        Dictionary<string, string> direct,
+        bool allowPrerelease,
+        VulnerabilityIndexData vulnerabilities)
+    {
+        Dictionary<string, HashSet<string>> introduced = new(StringComparer.OrdinalIgnoreCase);
+        foreach (KeyValuePair<string, string> root in direct)
+        {
+            HashSet<string> closure = new(StringComparer.OrdinalIgnoreCase);
+            Queue<(string Id, string Version, int Depth)> queue = new();
+            queue.Enqueue((root.Key, root.Value, 0));
+            while (queue.Count > 0)
+            {
+                (string id, string version, int depth) = queue.Dequeue();
+                if (depth >= MaxGraphDepth)
+                {
+                    continue;
+                }
+
+                foreach ((string dependencyId, string range) in ReadDependencies(id, version))
+                {
+                    string resolved = ResolveDependencyVersion(dependencyId, range, allowPrerelease, vulnerabilities, out _);
+                    if (!closure.Add(dependencyId))
+                    {
+                        continue;
+                    }
+
+                    queue.Enqueue((dependencyId, resolved, depth + 1));
+                }
+            }
+
+            introduced[root.Key] = closure;
+        }
+
+        return introduced;
+    }
+
+    /// <summary>依赖图给的版本是否已经满足参数要求的版本（没指定版本时，图里的版本就算满足）。</summary>
+    private static bool VersionSatisfied(Dictionary<string, string> graph, Dictionary<string, string> requested, string name)
+    {
+        if (!requested.TryGetValue(name, out string? wanted) || wanted.Length == 0)
+        {
+            return true;
+        }
+
+        if (!graph.TryGetValue(name, out string? resolved) || resolved.Length == 0)
+        {
+            return false;
+        }
+
+        if (!ComparableVersion.TryParse(wanted.TrimStart('^', '~'), out ComparableVersion? wantedVersion) || wantedVersion == null)
+        {
+            // "*" 这类"要最新的"：依赖图给什么就用什么
+            return true;
+        }
+
+        return ComparableVersion.TryParse(resolved, out ComparableVersion? resolvedVersion)
+            && resolvedVersion != null
+            && resolvedVersion.CompareTo(wantedVersion) >= 0;
+    }
+
     private static string ResolveDependencyVersion(
         string dependencyId,
         string range,
@@ -364,6 +467,54 @@ public static class PackageManager
 
             yield return (id, dependency.Attribute("version")?.Value ?? "");
         }
+    }
+
+    /// <summary>
+    /// 落盘后核对漏洞警告：<c>dotnet restore</c> 带 <c>NuGetAuditMode=all</c>（覆盖传递依赖），
+    /// 把 NU1901–NU1904 摘出来。漏洞索引可能滞后，所以这一步不能省。
+    /// </summary>
+    private static void AppendAudit(StringBuilder builder, string projectPath, string workingDirectory)
+    {
+        CommandResult result;
+        try
+        {
+            result = CommandRunner.Run(
+                "dotnet",
+                ["restore", projectPath, "-p:NuGetAuditMode=all", "--nologo"],
+                workingDirectory,
+                300);
+        }
+        catch (Exception exception) when (exception is TimeoutException or System.ComponentModel.Win32Exception)
+        {
+            builder.AppendLine($"- 核对未执行：{exception.Message}");
+            return;
+        }
+
+        IReadOnlyList<string> warnings = ExtractAuditWarnings(result.Output);
+        if (warnings.Count == 0)
+        {
+            builder.AppendLine(result.Succeeded
+                ? "- 未发现 NU1901–NU1904（已带 NuGetAuditMode=all，覆盖传递依赖）。"
+                : $"- restore 未成功（退出码 {result.ExitCode}），本次核对不完整。");
+            return;
+        }
+
+        foreach (string warning in warnings)
+        {
+            builder.AppendLine("- " + warning);
+        }
+    }
+
+    /// <summary>从 restore 输出里摘出 NU1901–NU1904 的行（纯函数，便于单测）。</summary>
+    internal static IReadOnlyList<string> ExtractAuditWarnings(string output)
+    {
+        return
+        [
+            .. output
+                .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(line => AuditWarningRegex.IsMatch(line))
+                .Distinct(StringComparer.Ordinal),
+        ];
     }
 
     private static void Append(StringBuilder builder, IEnumerable<string> lines)

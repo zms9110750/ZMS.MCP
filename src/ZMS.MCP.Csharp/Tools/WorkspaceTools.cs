@@ -73,11 +73,20 @@ public static class WorkspaceTools
             System.Text.StringBuilder builder = new();
             builder.AppendLine("# 包引用");
             builder.AppendLine($"- 项目：{graph.ProjectPath}");
-            builder.AppendLine($"- 依赖图来源：{(graph.AssetsMissing ? "ReferencePath（还原产物缺失，可能不全）" : "真实还原结果")}");
-            builder.AppendLine($"- assets：{graph.AssetsPath}");
-            if (graph.MayBeStale)
+            if (graph.AssetsMissing)
             {
-                builder.AppendLine("- ⚠ 依赖图可能已过期（csproj / props 比还原产物新）");
+                // 没有还原产物时只说这一句：再打"可能已过期"是同一件事说两遍
+                string assets = graph.AssetsPath.Length == 0 ? "（MSBuild 没给出 ProjectAssetsFile）" : graph.AssetsPath;
+                builder.AppendLine($"- 依赖图来源：ReferencePath（还原产物缺失，可能不全）{assets}");
+            }
+            else
+            {
+                builder.AppendLine("- 依赖图来源：真实还原结果");
+                builder.AppendLine($"- assets：{graph.AssetsPath}");
+                if (graph.MayBeStale)
+                {
+                    builder.AppendLine("- ⚠ 依赖图可能已过期（csproj / props 比还原产物新）");
+                }
             }
 
             builder.AppendLine();
@@ -101,11 +110,11 @@ public static class WorkspaceTools
         "latest non-vulnerable one using the NuGet vulnerability index. Each item is 'Name' or 'Name@Version'.")]
     public static string InstallPackages(
         [Description("csproj path, or a unique project name")] string csprojPath,
-        [Description("Packages to install, e.g. [\"Newtonsoft.Json@13.0.3\", \"Polly\"]")] string[] packages,
+        [Description("Packages to install: each item is 'nugetName' or 'nugetName@version', e.g. [\"Newtonsoft.Json@13.0.3\", \"Polly\"]")] string[] nugetPack,
         [Description("Only decide and show what would happen, do not run the commands")] bool dryRun = false,
         [Description("Also allow prerelease versions")] bool allowPrerelease = false)
     {
-        return ToolGuard.Run(() => PackageManager.Install(csprojPath, ParseRequests(packages), dryRun, allowPrerelease));
+        return ToolGuard.Run(() => PackageManager.Install(csprojPath, ParseRequests(nugetPack), dryRun, allowPrerelease));
     }
 
     [McpServerTool(ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]
@@ -114,16 +123,16 @@ public static class WorkspaceTools
         "Builds the package graph before and after so the report can list which transitive packages disappeared too.")]
     public static string RemovePackages(
         [Description("csproj path, or a unique project name")] string csprojPath,
-        [Description("Package ids to remove")] string[] packageNames,
+        [Description("nugetName: package ids to remove")] string[] nugetName,
         [Description("Only show what would happen, do not run the commands")] bool dryRun = false)
     {
-        return ToolGuard.Run(() => PackageManager.Remove(csprojPath, packageNames, dryRun));
+        return ToolGuard.Run(() => PackageManager.Remove(csprojPath, nugetName, dryRun));
     }
 
-    internal static List<PackageRequest> ParseRequests(IEnumerable<string> packages)
+    internal static List<PackageRequest> ParseRequests(IEnumerable<string> nugetPack)
     {
         List<PackageRequest> requests = [];
-        foreach (string item in packages)
+        foreach (string item in nugetPack)
         {
             string trimmed = (item ?? "").Trim();
             if (trimmed.Length == 0)

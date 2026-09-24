@@ -1,6 +1,8 @@
+using System.Reflection;
 using System.Text;
 using Xunit;
 using ZMS.MCP.Csharp.Project;
+using ZMS.MCP.Csharp.Roslyn;
 
 namespace ZMS.MCP.Csharp.Test;
 
@@ -23,6 +25,41 @@ public sealed class WorkspaceLayerTests
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, content);
         return path;
+    }
+
+    private static string RepositoryRoot()
+    {
+        // 构建输出被重定向到仓库外（见测试 csproj 的 AssemblyMetadata），所以先看编译期写进来的根
+        string? fromMetadata = typeof(WorkspaceLayerTests).Assembly
+            .GetCustomAttributes<AssemblyMetadataAttribute>()
+            .FirstOrDefault(attribute => attribute.Key == "RepositoryRoot")
+            ?.Value;
+        if (!string.IsNullOrEmpty(fromMetadata))
+        {
+            string candidate = Path.GetFullPath(fromMetadata);
+            if (File.Exists(Path.Combine(candidate, "ZMS.MCP.slnx")))
+            {
+                return candidate;
+            }
+        }
+
+        DirectoryInfo? directory = new(AppContext.BaseDirectory);
+        while (directory != null)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "ZMS.MCP.slnx")))
+            {
+                return directory.FullName;
+            }
+
+            directory = directory.Parent;
+        }
+
+        throw new InvalidOperationException("找不到仓库根（ZMS.MCP.slnx）。");
+    }
+
+    private static string SelfProjectPath()
+    {
+        return Path.Combine(RepositoryRoot(), "src", "ZMS.MCP.Csharp", "ZMS.MCP.Csharp.csproj");
     }
 
     // ───────── 向上找 ─────────
@@ -73,8 +110,10 @@ public sealed class WorkspaceLayerTests
     }
 
     [Fact]
-    public void CollectDeclarationFiles_includes_restore_generated_files()
+    public void CollectDeclarationFiles_reports_when_the_obj_location_is_unknown()
     {
+        // 这个 csproj 没有 TargetFramework，MSBuild 评估必然失败：此时**不能**硬编码 <项目目录>/obj/，
+        // 而要说明"问不到，所以不列"
         string root = NewTempDirectory();
         string project = Write(root, "Demo.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
         Write(root, "obj/Demo.csproj.nuget.g.props", "<Project />");
@@ -82,8 +121,62 @@ public sealed class WorkspaceLayerTests
 
         IReadOnlyList<DeclarationFile> files = ProjectViewer.CollectDeclarationFiles(project);
 
-        Assert.Contains(files, file => file.Path.EndsWith("Demo.csproj.nuget.g.props", StringComparison.OrdinalIgnoreCase));
-        Assert.Contains(files, file => file.Path.EndsWith("Demo.csproj.nuget.g.targets", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(files, file => file.Path.Contains("nuget.g.", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(files, file => file.Path == "(obj 的位置未知)");
+    }
+
+    [Fact]
+    public void ResolveIntermediateDirectory_asks_msbuild_instead_of_hard_coding_obj()
+    {
+        // 真实项目：obj 的位置必须来自 MSBuild（本仓库的中间输出目录本身就被重定向过）
+        string directory = ProjectViewer.ResolveIntermediateDirectory(SelfProjectPath(), out string source);
+
+        Assert.NotEmpty(directory);
+        Assert.True(Directory.Exists(directory), directory);
+        Assert.Contains("MSBuild", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CollectDeclarationFiles_follows_an_import_of_the_nearest_props()
+    {
+        string root = NewTempDirectory();
+        string project = Write(root, "src/Demo.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        string upper = Write(root, "Directory.Build.props", "<Project><PropertyGroup><LangVersion>latest</LangVersion></PropertyGroup></Project>");
+        // 最近的 Directory.Build.props 自己 Import 了更上层那份 —— 那份同样参与项目声明
+        Write(root, "src/Directory.Build.props", "<Project><Import Project=\"../Directory.Build.props\" /></Project>");
+
+        IReadOnlyList<DeclarationFile> files = ProjectViewer.CollectDeclarationFiles(project);
+        List<string> paths = [.. files.Select(file => Path.GetFullPath(file.Path))];
+
+        Assert.Contains(Path.Combine(root, "src", "Directory.Build.props"), paths);
+        Assert.Contains(Path.GetFullPath(upper), paths);
+    }
+
+    [Fact]
+    public void ResolveImportPath_expands_msbuild_this_file_directory_and_refuses_unknowns()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "zms-import");
+
+        string? resolved = ProjectViewer.ResolveImportPath("$(MSBuildThisFileDirectory)../Shared.props", directory);
+
+        Assert.Equal(Path.GetFullPath(Path.Combine(directory, "..", "Shared.props")), resolved);
+        // 未知属性 / 通配符：解析不出来就不猜
+        Assert.Null(ProjectViewer.ResolveImportPath("$(UnknownDir)/A.props", directory));
+        Assert.Null(ProjectViewer.ResolveImportPath("*.props", directory));
+    }
+
+    // ───────── 编辑解决方案的格式限制 ─────────
+
+    [Fact]
+    public void RequireSlnx_accepts_slnx_and_refuses_sln()
+    {
+        string root = NewTempDirectory();
+        string sln = Write(root, "Hello.sln", "");
+        string slnx = Write(root, "Hello.slnx", "<Solution />");
+
+        Assert.Equal(slnx, SolutionExplorer.RequireSlnx(slnx));
+        Assert.Throws<InvalidOperationException>(() => SolutionExplorer.RequireSlnx(sln));
+        Assert.Throws<FileNotFoundException>(() => SolutionExplorer.RequireSlnx(Path.Combine(root, "Nope.slnx")));
     }
 
     [Fact]
@@ -305,6 +398,68 @@ public sealed class WorkspaceLayerTests
         Assert.Equal([0xEF, 0xBB, 0xBF], bytes[..3]);
         Assert.Contains("class B", File.ReadAllText(file, Encoding.UTF8), StringComparison.Ordinal);
         Assert.Empty(Directory.GetFiles(root, "*.zms-tmp-*"));
+    }
+
+    [Fact]
+    public void Probe_reports_writable_busy_and_read_only()
+    {
+        string root = NewTempDirectory();
+        string file = Path.Combine(root, "A.cs");
+        File.WriteAllText(file, "class A { }");
+
+        // 正常文件：可写
+        Assert.Equal(WriteProbe.Writable, FileWriter.Probe(file));
+
+        // 被独占占用 → Busy
+        using (FileStream _ = new(file, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            Assert.Equal(WriteProbe.Busy, FileWriter.Probe(file));
+        }
+
+        // 只读属性 → ReadOnly
+        File.SetAttributes(file, FileAttributes.ReadOnly);
+        Assert.Equal(WriteProbe.ReadOnly, FileWriter.Probe(file));
+        File.SetAttributes(file, FileAttributes.Normal);
+
+        // 新文件：目录可写 → Writable
+        Assert.Equal(WriteProbe.Writable, FileWriter.Probe(Path.Combine(root, "New.cs")));
+    }
+
+    [Fact]
+    public void WriteAtomic_skips_the_write_when_content_is_unchanged()
+    {
+        string root = NewTempDirectory();
+        string file = Path.Combine(root, "Same.cs");
+        File.WriteAllText(file, "class A { }");
+        DateTime before = File.GetLastWriteTimeUtc(file);
+
+        bool written = FileWriter.WriteAtomic(file, "class A { }");
+
+        Assert.False(written);
+        // 没写：时间戳保持原样，也不留临时文件
+        Assert.Equal(before, File.GetLastWriteTimeUtc(file));
+        Assert.Empty(Directory.GetFiles(root, "*.zms-tmp-*"));
+    }
+
+    [Fact]
+    public void WriteAtomic_retries_a_busy_file_then_reports_it_and_cleans_up()
+    {
+        string root = NewTempDirectory();
+        string file = Path.Combine(root, "Locked.cs");
+        File.WriteAllText(file, "class A { }");
+
+        // 独占占住目标文件，模拟"编辑器 / 杀软 / 索引器正拿着它"
+        using (FileStream _ = new(file, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
+                () => FileWriter.WriteAtomic(file, "class B { }", encoding: null, retryDelays: [1, 1, 1]));
+            Assert.Contains("写入失败", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("占用", exception.Message, StringComparison.Ordinal);
+        }
+
+        // 失败也不能留下临时文件，且原内容不动
+        Assert.Empty(Directory.GetFiles(root, "*.zms-tmp-*"));
+        Assert.Equal("class A { }", File.ReadAllText(file));
     }
 
     [Fact]

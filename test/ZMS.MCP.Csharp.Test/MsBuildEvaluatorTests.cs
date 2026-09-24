@@ -60,6 +60,34 @@ public sealed class MsBuildEvaluatorTests
         return project;
     }
 
+    // ───────── 缓存失效：源文件指纹 ─────────
+
+    [Fact]
+    public void SourceFingerprint_changes_when_source_files_are_added_or_touched()
+    {
+        string project = NewFakeProject(out string directory);
+        File.WriteAllText(Path.Combine(directory, "A.cs"), "class A { }");
+        string before = MsBuildEvaluator.SourceFingerprint(project);
+
+        // 新增源文件 → 指纹变（MSBuild 的 Compile 项来自 glob，新文件不在"监视文件"里，
+        // 不靠指纹的话刚落盘的新类型在本次会话里看不到）
+        File.WriteAllText(Path.Combine(directory, "B.cs"), "class B { }");
+        string added = MsBuildEvaluator.SourceFingerprint(project);
+        Assert.NotEqual(before, added);
+
+        // 改动已有源文件 → 指纹也变
+        File.SetLastWriteTimeUtc(Path.Combine(directory, "A.cs"), DateTime.UtcNow.AddMinutes(5));
+        Assert.NotEqual(added, MsBuildEvaluator.SourceFingerprint(project));
+
+        // bin / obj 里的 .cs 不算数
+        string obj = Path.Combine(directory, "obj");
+        Directory.CreateDirectory(obj);
+        File.WriteAllText(Path.Combine(obj, "First.cs"), "class G { }");
+        string withObj = MsBuildEvaluator.SourceFingerprint(project);
+        File.WriteAllText(Path.Combine(obj, "Second.cs"), "class H { }");
+        Assert.Equal(withObj, MsBuildEvaluator.SourceFingerprint(project));
+    }
+
     // ───────── 真实项目评估 ─────────
 
     [Fact]

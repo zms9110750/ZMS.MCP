@@ -33,173 +33,692 @@ public sealed record DiagnosticSnapshot(IReadOnlyList<DiagnosticKey> Errors, IRe
 /// </summary>
 public static class DraftService
 {
+    /// <summary>变更分类与顺序（需求文档写的是"增加，删除，修改"）。</summary>
+    private static readonly string[] Categories = ["增加", "删除", "修改"];
+
+    /// <summary>
+    /// 一条改动属于哪一类。CodeEditor 的 action 是 removed / replaced / added 这类英文标记，
+    /// 新建类型、新建内部类、补 partial 都归入"增加"。
+    /// </summary>
+    internal static string CategoryOf(DraftEdit edit)
+    {
+        return edit.Action switch
+        {
+            "removed" => "删除",
+            "replaced" => "修改",
+            _ => "增加",
+        };
+    }
+
+    /// <summary>
+    /// 前滚：多文件落盘不是真原子（见需求文档），中途崩溃会留下"写前日志"。
+    /// 每发现一份未清掉的日志，就按它记下的内容重写一遍并清掉 —— 下次启动即补齐。
+    /// </summary>
+    /// <param name="databasePath">拟定库路径；空 = MCP 自己的目录（测试可注入临时库）。</param>
+    public static string RecoverPendingWrites(string? databasePath = null)
+    {
+        DraftStore store = new(databasePath);
+        List<string> messages = [];
+        foreach (string cookit in store.JournalCookits())
+        {
+            int written = 0;
+            int skipped = 0;
+            List<string> held = [];
+            foreach (DraftStore.JournalEntry entry in store.ReadJournal(cookit))
+            {
+                if (!File.Exists(entry.FilePath))
+                {
+                    // 崩在"新建文件"之前 → 补齐
+                    FileWriter.WriteAtomic(entry.FilePath, entry.NewContent);
+                    written++;
+                    continue;
+                }
+
+                if (string.Equals(File.ReadAllText(entry.FilePath), entry.NewContent, StringComparison.Ordinal))
+                {
+                    // 崩在"写完之后、清日志之前" → 已经是新内容，别动（也不搅动时间戳）
+                    skipped++;
+                    continue;
+                }
+
+                if (entry.PreviousHash.Length > 0
+                    && string.Equals(
+                        FileWriter.ComputeHash(entry.FilePath),
+                        entry.PreviousHash,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    // 还是"写之前"那一份 → 覆盖成拟定内容
+                    FileWriter.WriteAtomic(entry.FilePath, entry.NewContent);
+                    written++;
+                    continue;
+                }
+
+                // 第三种：既不是新内容、也不是写前内容 —— 有人在崩溃窗口里改过 → **只报告，绝不覆盖**
+                held.Add($"  - {entry.FilePath}（保持原样，未改动）");
+            }
+
+            if (held.Count > 0)
+            {
+                // 有拿不准的文件 → 日志**留着**，别静默丢掉唯一的判断依据
+                messages.Add($"- {cookit}：{written} 个补齐、{skipped} 个已是新内容；以下文件被手改过，保持原样：");
+                messages.AddRange(held);
+                continue;
+            }
+
+            store.ClearJournal(cookit);
+            messages.Add($"- {cookit}（{written} 个补齐、{skipped} 个已是新内容）");
+        }
+
+        if (messages.Count == 0)
+        {
+            return "";
+        }
+
+        return "# 前滚：处理上次未写完的落盘" + Environment.NewLine + string.Join(Environment.NewLine, messages);
+    }
+
     /// <summary>拟定：先做语法检查，通过才记进拟定；<paramref name="content"/> 为 null 表示删除成员。</summary>
+    /// <summary>
+    /// 拟定编辑（`docs/Csharp-拟定流程v3.md` 第三节 2）：**只记符号 + 意图 + 首次快照**，
+    /// 不算文件路径、不算整文件内容（那些留到预检/落盘现场做）；同一符号只保留一条生效条目。
+    /// </summary>
     public static string Stage(string csprojPath, string typePath, string memberName, string? content)
     {
         string projectPath = ProjectViewer.ResolveProjectFile(csprojPath);
         DraftStore store = new();
-        DraftRecord record = store.GetOrCreate(projectPath);
-        LoadedProject project = LoadedProject.Load(projectPath);
+        if (store.GetTracking(projectPath) == null)
+        {
+            throw new InvalidOperationException("这个项目还没有追踪：先调用 track_project（记了快照才能编辑拟定）。");
+        }
 
-        // 把拟定里已经算好的内容重放进编译对象，这样「累积」时第二次拟定看到的是第一次的结果
-        CSharpCompilation compilation = Replay(project.Compilation, record.Edits);
-        List<CodeChange> changes = BuildChanges(project, compilation, typePath, memberName, content, out string description);
+        if (content != null)
+        {
+            // 语法检查：新内容必须是合法的 C# 成员声明
+            CodeEditor.EnsureMembersParse(content);
+        }
+
+        LoadedProject project = LoadedProject.Load(projectPath);
+        (string symbolKey, string snapshot, string action) = DescribeSymbol(project, typePath, memberName, content);
+
+        // 同一个符号只保留一条生效条目（替换，不是追加）
+        store.ReplaceSymbol(projectPath, typePath, memberName, content, symbolKey, snapshot, action);
+        // 拟定变了 → 落盘许可作废
+        PermitStore.Invalidate(projectPath);
 
         StringBuilder builder = new();
-        builder.AppendLine("# 拟定已累加");
+        builder.AppendLine("# 拟定已更新");
         builder.AppendLine($"- 项目：{projectPath}");
-        builder.AppendLine($"- cookit：`{record.Cookit}`");
-        builder.AppendLine($"- 本次：{description}");
+        builder.AppendLine($"- 符号：{symbolKey}");
+        builder.AppendLine($"- 本次：{(content == null ? "删除" : "写入")}（{action}）");
+        builder.AppendLine($"- 拟定条数：{store.Find(projectPath)?.Edits.Count ?? 0}");
         if (project.ModeNotice().Length > 0)
         {
             builder.AppendLine($"- {project.ModeNotice()}");
         }
 
-        builder.AppendLine();
-        builder.AppendLine("- 本次涉及的文件：");
-        foreach (CodeChange change in changes)
-        {
-            string baseline = BaselineHash(record, change.FilePath);
-            store.Append(projectPath, typePath, memberName, content, change.FilePath, baseline, change.NewContent, change.Action);
-            builder.AppendLine($"  - {change.FilePath}（{change.Action}）");
-        }
-
+        builder.AppendLine("- 落盘许可（若有）已作废：要落盘请重新 confirm_draft（不带 cookie）做预检。");
         return builder.ToString();
     }
 
-    /// <summary>列出这个项目当前的拟定（agent 重启后靠它重新拿到 cookit 与进度）。</summary>
-    public static string List(string csprojPath)
+    /// <summary>解析这次编辑对应的符号身份、快照文本与动作。</summary>
+    private static (string SymbolKey, string Snapshot, string Action) DescribeSymbol(
+        LoadedProject project,
+        string typePath,
+        string memberName,
+        string? content)
     {
-        string projectPath = ProjectViewer.ResolveProjectFile(csprojPath);
-        DraftStore store = new();
-        DraftRecord? record = store.Find(projectPath);
-        if (record == null)
+        string verb = content == null ? "removed" : "replaced";
+        INamedTypeSymbol? type = SymbolLocator.FindType(project.Compilation, typePath);
+        if (type == null || !IsExactTypePath(type, typePath))
         {
-            return $"# 拟定\n{projectPath}\n没有未完成的拟定。";
+            // 类型还不存在 —— 或者 typePath 指的是**嵌套类型**、而 FindType 只解到了外层类型，
+            // 两种都是"新建类型"（快照为空 = 当时不存在）
+            return (typePath, "", content == null ? "removed" : "新建类型");
         }
 
-        StringBuilder builder = new();
-        builder.AppendLine("# 拟定");
-        builder.AppendLine($"- 项目：{projectPath}");
-        builder.AppendLine($"- cookit：`{record.Cookit}`");
-        builder.AppendLine($"- 起始时间：{record.CreatedAt}");
-        builder.AppendLine($"- 条数：{record.Edits.Count}");
-        builder.AppendLine();
-        foreach (DraftEdit edit in record.Edits)
+        if (memberName.Length == 0)
         {
-            string action = edit.IsDelete ? "删除" : "写入";
-            builder.AppendLine($"- [{edit.Sequence}] {action} {edit.TypePath}.{edit.MemberName} → {edit.FilePath}");
+            return (SymbolBaseline.Key(type), SymbolBaseline.DeclaredText(type), verb);
         }
 
-        return builder.ToString();
+        IReadOnlyList<ISymbol> members = SymbolLocator.FindMembers(type, memberName);
+        if (members.Count > 1)
+        {
+            throw new InvalidOperationException(
+                $"'{memberName}' 匹配到 {members.Count} 个重载，请带上参数列表消歧：{Environment.NewLine}"
+                + MemberListRendering.DescribeOverloads(members));
+        }
+
+        if (members.Count == 0)
+        {
+            return ($"{SymbolBaseline.Key(type)}.{memberName}", "", content == null ? "removed" : "added");
+        }
+
+        ISymbol member = members[0];
+        return (SymbolBaseline.Key(member), SymbolBaseline.DeclaredText(member), verb);
     }
 
     /// <summary>
-    /// 确认拟定：列出变更分类与诊断对比，并给出 cookit。
-    /// 带了 cookit 并且与拟定一致时**落盘**；否则只预演。
+    /// <paramref name="typePath"/> 是否**恰好**指向这个类型本身。
+    /// <c>SymbolLocator.FindType</c> 会宽容地返回最长前缀（<c>Demo.Class1.Inner2</c> 解不到时会返回
+    /// <c>Demo.Class1</c>），所以"这是不是一次新建"只能靠尾段名字自己判，不能只看 FindType 有没有返回。
     /// </summary>
-    public static string Confirm(string csprojPath, string cookit, bool apply)
+    private static bool IsExactTypePath(INamedTypeSymbol type, string typePath)
+    {
+        string tail = typePath[(typePath.LastIndexOf('.') + 1)..];
+
+        // 泛型的两种写法都要接受：`Ns.Box<T>` 与 `Ns.Box`1`
+        int angle = tail.IndexOf('<');
+        if (angle >= 0)
+        {
+            tail = tail[..angle];
+        }
+
+        int tick = tail.IndexOf('`');
+        if (tick >= 0)
+        {
+            tail = tail[..tick];
+        }
+
+        return type.Name.Equals(tail.Trim(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// 选择器（第三节 7）：解决某个符号的冲突 —— `draft`/`snapshot`/`disk` 用选中的内容**代替现在的拟定**，
+    /// `drop` 直接删掉该符号的拟定条目。
+    /// </summary>
+    public static string Select(string csprojPath, string memberPath, string selectCookie, string choice)
     {
         string projectPath = ProjectViewer.ResolveProjectFile(csprojPath);
         DraftStore store = new();
         DraftRecord? record = store.Find(projectPath);
         if (record == null || record.Edits.Count == 0)
         {
-            return $"# 拟定确认\n{projectPath}\n没有未完成的拟定。";
+            throw new InvalidOperationException("没有未完成的拟定可以处理。");
         }
 
-        bool cookitGiven = !string.IsNullOrWhiteSpace(cookit);
-        if (cookitGiven && !cookit.Trim().Equals(record.Cookit, StringComparison.OrdinalIgnoreCase))
+        List<DraftEdit> matches =
+        [
+            .. record.Edits.Where(item =>
+                item.SymbolKey.Equals(memberPath, StringComparison.Ordinal)
+                || EditLabel(item).Equals(memberPath, StringComparison.Ordinal)
+                || item.MemberName.Equals(memberPath, StringComparison.Ordinal)),
+        ];
+        if (matches.Count == 0)
+        {
+            throw new InvalidOperationException($"拟定里没有这个符号：{memberPath}");
+        }
+
+        if (matches.Count > 1)
+        {
+            // 不猜（同 §七：命中多个就报出来），让调用方用完整符号键消歧
+            throw new InvalidOperationException(
+                $"'{memberPath}' 命中 {matches.Count} 条拟定，请用完整符号键指定：{Environment.NewLine}"
+                + string.Join(Environment.NewLine, matches.Select(item => "  - " + item.SymbolKey)));
+        }
+
+        DraftEdit edit = matches[0];
+
+        SelectPermit? permit = PermitStore.TakeSelect(projectPath, edit.SymbolKey, selectCookie);
+        if (permit == null)
         {
             throw new InvalidOperationException(
-                $"cookit 不匹配（拟定里是 {record.Cookit}）—— 拒绝落盘，避免把别人的改动当成自己的。");
+                "选择 cookie 无效（可能已被用掉、或已被新的查看替换）：重新 get_member 拿新的。");
         }
 
-        LoadedProject before = LoadedProject.Load(projectPath);
-        DiagnosticSnapshot beforeDiagnostics = Analyze(before.Compilation);
-        DiagnosticSnapshot afterDiagnostics = Analyze(Replay(before.Compilation, record.Edits));
-
-        StringBuilder builder = new();
-        builder.AppendLine("# 拟定确认");
-        builder.AppendLine($"- 项目：{projectPath}");
-        builder.AppendLine($"- cookit：`{record.Cookit}`");
-        builder.AppendLine();
-        builder.AppendLine("## 变更分类");
-        foreach (IGrouping<string, DraftEdit> group in record.Edits.GroupBy(edit => edit.IsDelete ? "删除" : "写入"))
+        string description;
+        switch (choice.Trim().ToLowerInvariant())
         {
-            builder.AppendLine($"### {group.Key}（{group.Count()}）");
-            foreach (DraftEdit edit in group)
+            case "draft":
+                store.ReplaceSymbol(projectPath, edit.TypePath, edit.MemberName, edit.RequestedContent, edit.SymbolKey, permit.Disk, "replaced", keepFirstSnapshot: false);
+                description = "用拟定内容（坚持本次写法）";
+                break;
+            case "snapshot":
+                store.ReplaceSymbol(projectPath, edit.TypePath, edit.MemberName, permit.Snapshot, edit.SymbolKey, permit.Disk, "replaced", keepFirstSnapshot: false);
+                description = "用快照内容（回到编辑前）";
+                break;
+            case "disk":
+                store.ReplaceSymbol(projectPath, edit.TypePath, edit.MemberName, permit.Disk, edit.SymbolKey, permit.Disk, "replaced", keepFirstSnapshot: false);
+                description = "用现状内容（这个符号等于不改）";
+                break;
+            case "drop":
+                store.RemoveSymbol(projectPath, edit.SymbolKey);
+                description = "取消拟定（不再改这个符号）";
+                break;
+            default:
+                throw new ArgumentException("choice 只能是 draft / snapshot / disk / drop。");
+        }
+
+        PermitStore.Invalidate(projectPath);
+        return $"# 选择已应用{Environment.NewLine}"
+            + $"- 符号：{edit.SymbolKey}{Environment.NewLine}"
+            + $"- 选择：{description}{Environment.NewLine}"
+            + $"- 落盘许可已作废：要落盘请重新 confirm_draft（不带 cookie）做预检。";
+    }
+
+    /// <summary>
+    /// 启动维护（v3 文档第六节）：① 前滚未完成的落盘 → ② 清理孤儿拟定（S0 却有拟定条目）。
+    /// 这里**不**全量刷新追踪基线 —— 那会把"track 之后的外部改动"静默吞掉；
+    /// 基线只在每次落盘之后按现状重算（见 RefreshBaseline）。
+    /// </summary>
+    public static string StartupMaintenance()
+    {
+        StringBuilder builder = new();
+        try
+        {
+            string recovery = RecoverPendingWrites();
+            if (recovery.Length > 0)
             {
-                builder.AppendLine($"- {edit.TypePath}.{edit.MemberName} → {edit.FilePath}");
+                builder.AppendLine(recovery);
             }
         }
-
-        builder.AppendLine();
-        builder.AppendLine("## 诊断对比（按 错误码 + 消息 + 文件 配对，行号只用于展示）");
-        AppendDiagnostics(builder, "新增", afterDiagnostics, beforeDiagnostics);
-        AppendDiagnostics(builder, "消失", beforeDiagnostics, afterDiagnostics);
-
-        if (!apply || !cookitGiven)
+        catch (Exception exception)
         {
-            builder.AppendLine();
-            builder.AppendLine("（预演，未落盘。带准确的 cookit 再调用一次即落盘。）");
+            // 前滚失败：写前日志是唯一依据，必须留着，孤儿清理也别做
+            builder.AppendLine($"# 前滚失败（未完成，已保留写前日志）：{exception.Message}");
             return builder.ToString();
         }
 
-        // 落盘前校验基线 hash：拟定期间被外部改动过的文件 → 报冲突、拒绝落盘，不覆盖别人的改动
-        List<string> targets = [.. record.Edits.Select(edit => edit.FilePath).Distinct(StringComparer.OrdinalIgnoreCase)];
-        List<string> conflicts = [];
-        foreach (string file in targets)
+        DraftStore store = new();
+        int orphans = 0;
+        foreach (DraftRecord record in store.ListAll())
         {
-            DraftEdit first = record.Edits.First(edit => edit.FilePath.Equals(file, StringComparison.OrdinalIgnoreCase));
-            if (!string.Equals(FileWriter.ComputeHash(file), first.BaselineHash, StringComparison.OrdinalIgnoreCase))
+            if (store.GetTracking(record.ProjectPath) != null || store.HasPendingJournal(record.ProjectPath))
             {
-                conflicts.Add(file);
+                continue;
+            }
+
+            try
+            {
+                store.Clear(record.ProjectPath);
+                orphans++;
+            }
+            catch (Exception exception)
+            {
+                builder.AppendLine($"# 孤儿拟定清理失败：{record.ProjectPath} —— {exception.Message}");
             }
         }
 
-        if (conflicts.Count > 0)
+        if (orphans > 0)
+        {
+            builder.AppendLine($"# 孤儿拟定清理：{orphans} 个项目没有追踪记录，其拟定条目已清理（它们来自更早的版本）");
+        }
+
+        return builder.ToString();
+    }
+
+    /// <summary>列出当前拟定（只列符号与分类 —— 拟定里没有文件路径；文件在预检时才定位）。</summary>
+    public static string List(string csprojPath)
+    {
+        string projectPath = ProjectViewer.ResolveProjectFile(csprojPath);
+        DraftStore store = new();
+        DraftRecord? record = store.Find(projectPath);
+        if (record == null || record.Edits.Count == 0)
+        {
+            return $"# 拟定{Environment.NewLine}{projectPath}{Environment.NewLine}没有未完成的拟定。";
+        }
+
+        StringBuilder builder = new();
+        builder.AppendLine("# 拟定");
+        builder.AppendLine($"- 项目：{projectPath}");
+        builder.AppendLine($"- 起始时间：{record.CreatedAt}");
+        builder.AppendLine($"- 条数：{record.Edits.Count}");
+        builder.AppendLine();
+        foreach (DraftEdit edit in record.Edits)
+        {
+            builder.AppendLine($"- [{edit.Sequence}] {CategoryOf(edit)} {EditLabel(edit)}");
+        }
+
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// 拟定确认（第三节 5）：
+    /// **不带 cookie** = 重建符号树 → 现场定位文件 → 预检（占用/冲突/字节）→ 通过就发**内存** applyCookie 并记许可快照；
+    /// **带 cookie** = 校验 cookie 与「路径 + 文件字节」→ 现场生成整文件新文本 → 落盘事务。
+    /// </summary>
+    public static string Confirm(string csprojPath, string applyCookie, bool apply)
+    {
+        string projectPath = ProjectViewer.ResolveProjectFile(csprojPath);
+        DraftStore store = new();
+        DraftRecord? record = store.Find(projectPath);
+        if (record == null || record.Edits.Count == 0)
+        {
+            return $"# 拟定确认{Environment.NewLine}{projectPath}{Environment.NewLine}没有未完成的拟定。";
+        }
+
+        LoadedProject project = LoadedProject.Load(projectPath);
+        DraftPlanner.Plan plan = DraftPlanner.Compute(project, record.Edits);
+        DiagnosticSnapshot before = Analyze(project.Compilation);
+        // 诊断对比必须基于**现场算出来的**拟定结果：拟定里不再存 file_path / result_content，
+        // 旧的 Replay 拿到的是空串，会让"新增/消失"永远为空
+        DiagnosticSnapshot after = Analyze(plan.Projected);
+
+        bool cookieGiven = !string.IsNullOrWhiteSpace(applyCookie);
+        if (!apply || !cookieGiven)
+        {
+            return Precheck(projectPath, project, record, plan, before, after);
+        }
+
+        return ApplyWithPermit(projectPath, store, record, plan, applyCookie, before, after);
+    }
+
+    /// <summary>预检：报告「本次改动涉及」与问题；全部通过才发（内存）applyCookie。</summary>
+    private static string Precheck(
+        string projectPath,
+        LoadedProject project,
+        DraftRecord record,
+        DraftPlanner.Plan plan,
+        DiagnosticSnapshot before,
+        DiagnosticSnapshot after)
+    {
+        StringBuilder builder = new();
+        AppendChangeSummary(builder, projectPath, record, plan, before, after);
+
+        List<string> problems = [];
+        List<string> notices = [];
+        foreach (string missing in plan.Missing)
+        {
+            problems.Add($"⛔ 定位不到符号：{missing} —— 可能被改名/删除；用 get_member 看三方内容或重新 stage");
+        }
+
+        // 符号级冲突：当前声明文本 ≠ 拟定快照（也就是"拟定期间被非工具改动"）
+        Dictionary<string, string> currentBaseline = SymbolBaseline.Capture(project.Compilation);
+        foreach (DraftEdit edit in record.Edits)
+        {
+            if (edit.SymbolKey.Length == 0)
+            {
+                continue;
+            }
+
+            if (edit.SymbolSnapshot.Length == 0)
+            {
+                // 拟定开始时这个符号不存在（新建类型 / 新增成员）→ 现在存在了就是被外部抢先创建
+                if (currentBaseline.ContainsKey(edit.SymbolKey))
+                {
+                    problems.Add($"⛔ 新建目标已被外部创建：{edit.SymbolKey} —— 按冲突处理，请重新编辑");
+                }
+
+                continue;
+            }
+
+            if (!currentBaseline.TryGetValue(edit.SymbolKey, out string? currentHash))
+            {
+                problems.Add($"⛔ 符号已消失：{edit.SymbolKey}（可能被改名/移动）");
+                continue;
+            }
+
+            if (!string.Equals(currentHash, SymbolBaseline.HashText(edit.SymbolSnapshot), StringComparison.Ordinal))
+            {
+                problems.Add($"⚠ 冲突：{edit.SymbolKey} —— 拟定期间被非工具改动（用 get_member 看三方，或 select_draft 解决）");
+            }
+        }
+
+        Dictionary<string, SymbolPermitSnapshot> snapshot = new(StringComparer.Ordinal);
+        foreach (DraftPlanner.PlannedFile file in plan.Files)
+        {
+            // 只有"这次要新建这个文件"时才怕撞车：往既有文件里加成员是正常路径（N1 回归的教训）
+            bool createsNewFile = file.Actions.Any(action => action.Contains("新建", StringComparison.Ordinal));
+            if (createsNewFile && File.Exists(file.FilePath))
+            {
+                problems.Add($"⛔ 新建目标文件已存在：{file.FilePath} —— 这次是新建，整文件会被覆盖，请确认或换个类型名");
+            }
+
+            WriteProbe probe = FileWriter.Probe(file.FilePath);
+            if (probe == WriteProbe.DirectoryWillBeCreated)
+            {
+                // 提示级：不影响能不能落盘（目录会被建出来），但 agent 该知道推导出的路径会引入新层级
+                notices.Add($"⚠ 会新建目录：{file.FilePath} —— 这个目录现在不存在，落盘时会建出来");
+            }
+            else if (probe != WriteProbe.Writable)
+            {
+                problems.Add($"⛔ 不可写：{file.FilePath} —— {DescribeProbe(probe)}");
+                continue;
+            }
+
+            // 编码无法判定就在**预检这里**拒绝（不进落盘事务）：需求「写文件通则」要求"不猜、拒绝写并报告"
+            if (File.Exists(file.FilePath))
+            {
+                try
+                {
+                    FileWriter.DetectEncoding(file.FilePath);
+                }
+                catch (InvalidOperationException exception)
+                {
+                    problems.Add($"⛔ {exception.Message}");
+                    continue;
+                }
+            }
+
+            string hash = FileWriter.ComputeHash(file.FilePath);
+
+            // 文件级登记：这样"补 partial"这类不带符号归属的附带改动也在许可轨里，
+            // 否则它在"发许可 → 传许可"窗口里被外部改过时既不报冲突也不作废许可
+            snapshot[file.FilePath] = new SymbolPermitSnapshot(file.FilePath, hash);
+            foreach (string symbol in file.SymbolKeys)
+            {
+                snapshot[symbol] = new SymbolPermitSnapshot(file.FilePath, hash);
+            }
+        }
+
+        builder.AppendLine();
+        builder.AppendLine("## 预检查");
+        foreach (string notice in notices)
+        {
+            builder.AppendLine($"- {notice}");
+        }
+
+        if (problems.Count == 0)
+        {
+            string cookie = PermitStore.GrantApply(projectPath, snapshot);
+            builder.AppendLine("- ✅ 无占用、无冲突");
+            builder.AppendLine();
+            builder.AppendLine($"- 落盘 cookie：`{cookie}`（传回来才落盘；每次预检换新，旧 cookie 立刻失效）");
+            return builder.ToString();
+        }
+
+        PermitStore.Invalidate(projectPath);
+        foreach (string problem in problems)
+        {
+            builder.AppendLine($"- {problem}");
+        }
+
+        builder.AppendLine();
+        builder.AppendLine("（预检查未通过，不发放 applyCookie：解决上面列出的问题后重新预检。）");
+        return builder.ToString();
+    }
+
+    /// <summary>带 cookie 落盘：判定顺序写死（无许可 → cookie 不符 → 逐项比对），通过才写。</summary>
+    private static string ApplyWithPermit(
+        string projectPath,
+        DraftStore store,
+        DraftRecord record,
+        DraftPlanner.Plan plan,
+        string applyCookie,
+        DiagnosticSnapshot before,
+        DiagnosticSnapshot after)
+    {
+        if (!PermitStore.HasApply(projectPath))
+        {
+            throw new InvalidOperationException("没有有效的落盘许可：请先不带 cookie 调用一次做预检。");
+        }
+
+        IReadOnlyDictionary<string, SymbolPermitSnapshot>? snapshot = PermitStore.CheckApply(projectPath, applyCookie);
+        if (snapshot == null)
         {
             throw new InvalidOperationException(
-                "拟定期间这些文件被外部改动过，拒绝覆盖：\n" + string.Join("\n", conflicts.Select(file => "  - " + file)));
+                "cookie 已失效（可能被新的预检替换，或进程重启过）：请重新预检。");
         }
 
-        List<KeyValuePair<string, string>> files = [];
-        foreach (string file in targets)
+        if (plan.Missing.Count > 0)
         {
-            DraftEdit last = record.Edits.Last(edit => edit.FilePath.Equals(file, StringComparison.OrdinalIgnoreCase));
-            files.Add(new KeyValuePair<string, string>(file, last.ResultContent));
+            // 符号在"发许可 → 传许可"窗口里被改名/删除 → 拒绝，绝不静默少写一部分
+            PermitStore.Invalidate(projectPath);
+            throw new InvalidOperationException(
+                "落盘前有符号已经定位不到，许可已作废：\n"
+                + string.Join("\n", plan.Missing.Select(item => "  - " + item)));
         }
 
-        // 多文件落盘不是真原子：先记写前日志，**写完之后**才清（中途崩溃日志还在，下次可以前滚补齐）
-        store.RecordJournal(record.Cookit, files);
+        List<string> mismatched = [];
+        foreach (DraftPlanner.PlannedFile file in plan.Files)
+        {
+            // 文件级：涵盖"补 partial"这类没有符号归属的附带改动
+            if (!snapshot.TryGetValue(file.FilePath, out SymbolPermitSnapshot? filePermit))
+            {
+                mismatched.Add($"{file.FilePath}：许可里没有这个文件（本次改动范围变了）");
+            }
+            else if (!string.Equals(filePermit.FileHash, FileWriter.ComputeHash(file.FilePath), StringComparison.OrdinalIgnoreCase))
+            {
+                mismatched.Add($"{file.FilePath} 在发许可之后被外部改过");
+            }
+
+            foreach (string symbol in file.SymbolKeys)
+            {
+                if (!snapshot.TryGetValue(symbol, out SymbolPermitSnapshot? permit))
+                {
+                    continue;
+                }
+
+                if (!string.Equals(permit.FilePath, file.FilePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    mismatched.Add($"{symbol}：文件从 {permit.FilePath} 变成 {file.FilePath}（移动/改名）");
+                    continue;
+                }
+
+                if (!string.Equals(permit.FileHash, FileWriter.ComputeHash(file.FilePath), StringComparison.OrdinalIgnoreCase))
+                {
+                    mismatched.Add($"{symbol}：{file.FilePath} 在发许可之后被外部改过");
+                }
+            }
+        }
+
+        if (mismatched.Count > 0)
+        {
+            PermitStore.Invalidate(projectPath);
+            throw new InvalidOperationException(
+                "落盘目标状态与发许可时不一致，已作废许可：\n"
+                + string.Join("\n", mismatched.Select(item => "  - " + item)));
+        }
+
+        List<KeyValuePair<string, string>> files =
+        [
+            .. plan.Files.Select(file => new KeyValuePair<string, string>(file.FilePath, file.NewContent)),
+        ];
+
+        // 写前日志要带"写之前的 hash 与编码"：前滚靠它区分「已经写好 / 还是写前状态 / 被手改过」
+        List<DraftStore.JournalEntry> entries =
+        [
+            .. plan.Files.Select(file => new DraftStore.JournalEntry(
+                file.FilePath,
+                file.NewContent,
+                FileWriter.ComputeHash(file.FilePath),
+                FileWriter.DetectEncoding(file.FilePath).Encoding.WebName)),
+        ];
+
+        // 落盘事务：写前日志 → 原子写 → 清日志 → 清拟定与许可 → format → 整体重算基线
+        store.RecordJournal(record.Cookit, entries);
         foreach (KeyValuePair<string, string> file in files)
         {
             FileWriter.WriteAtomic(file.Key, file.Value);
         }
 
         store.ClearJournal(record.Cookit);
-        // 拟定到这里就算完成了。后面的 format 只是锦上添花：
-        // 它失败也不能把拟定留在「磁盘已改、拟定还在」的卡死状态（重试会被基线校验拦下来）。
         store.Clear(projectPath);
-        string formatLog = RunFormat(projectPath, targets);
+        PermitStore.Invalidate(projectPath);
+        MsBuildEvaluator.ClearCache();
+        string formatLog = RunFormat(projectPath, [.. files.Select(file => file.Key)]);
+        RefreshBaseline(projectPath);
 
+        StringBuilder builder = new();
+        AppendChangeSummary(builder, projectPath, record, plan, before, after);
         builder.AppendLine();
         builder.AppendLine("## 已落盘");
-        foreach (string file in targets)
+        foreach (KeyValuePair<string, string> file in files)
         {
-            builder.AppendLine($"- {file}");
+            builder.AppendLine($"- {file.Key}");
         }
 
         builder.AppendLine("- 编码：按各文件原编码写回（新建文件 UTF-8 无 BOM）");
         builder.AppendLine($"- 格式化：{formatLog}");
+        builder.AppendLine("- 追踪继续，基线已按落盘后的现状整体重算。");
         builder.AppendLine("- 未做任何 git 操作（提交/分支/贮藏都不动）");
         return builder.ToString();
+    }
+
+    /// <summary>落盘后按当前现状**整体重算**追踪基线（否则文件里其它符号的变化会被当成"未追踪更改"）。</summary>
+    private static void RefreshBaseline(string projectPath)
+    {
+        DraftStore store = new();
+        TrackingRecord? tracking = store.GetTracking(projectPath);
+        if (tracking == null)
+        {
+            return;
+        }
+
+        LoadedProject project = LoadedProject.Load(projectPath);
+        store.SaveTracking(projectPath, tracking.TrackingCookie, SymbolBaseline.Capture(project.Compilation));
+    }
+
+    /// <summary>变更分类 + 本次改动涉及 + 诊断对比（预检与落盘共用）。</summary>
+    private static void AppendChangeSummary(
+        StringBuilder builder,
+        string projectPath,
+        DraftRecord record,
+        DraftPlanner.Plan plan,
+        DiagnosticSnapshot before,
+        DiagnosticSnapshot after)
+    {
+        builder.AppendLine("# 拟定确认");
+        builder.AppendLine($"- 项目：{projectPath}");
+        builder.AppendLine();
+        builder.AppendLine("## 变更分类");
+        foreach (string category in Categories)
+        {
+            List<DraftEdit> group = [.. record.Edits.Where(edit => CategoryOf(edit) == category)];
+            if (group.Count == 0)
+            {
+                continue;
+            }
+
+            builder.AppendLine($"### {category}（{group.Count}）");
+            foreach (DraftEdit edit in group)
+            {
+                builder.AppendLine($"- {EditLabel(edit)}");
+            }
+        }
+
+        builder.AppendLine();
+        builder.AppendLine("## 本次改动涉及");
+        if (plan.Files.Count == 0)
+        {
+            builder.AppendLine("（无）");
+        }
+        else
+        {
+            foreach (DraftPlanner.PlannedFile file in plan.Files)
+            {
+                builder.AppendLine($"- {file.FilePath}（{string.Join("、", file.SymbolKeys)}）");
+            }
+        }
+
+        builder.AppendLine();
+        builder.AppendLine("## 诊断对比（按 错误码 + 消息 + 文件 配对，行号只用于展示）");
+        AppendDiagnostics(builder, "新增", after, before);
+        AppendDiagnostics(builder, "消失", before, after);
     }
 
     /// <summary>把拟定里算好的内容重放进编译对象（每个文件只取最后一条结果）。</summary>
     internal static CSharpCompilation Replay(CSharpCompilation compilation, IReadOnlyList<DraftEdit> edits)
     {
+        // 新增文件的语法树必须与既有树**同一个语言版本**，否则 CSharpCompilation.AddSyntaxTrees 会抛
+        // ArgumentException("不一致的语言版本") —— 所以基准解析选项取自 compilation 里已有的树，
+        // 不能写死 Preview。
+        CSharpParseOptions baseline = compilation.SyntaxTrees
+            .OfType<CSharpSyntaxTree>()
+            .Select(tree => tree.Options)
+            .FirstOrDefault()
+            ?? new CSharpParseOptions(LanguageVersion.Preview);
+
         CSharpCompilation result = compilation;
         foreach (string file in edits.Select(edit => edit.FilePath).Distinct(StringComparer.OrdinalIgnoreCase))
         {
@@ -207,7 +726,7 @@ public static class DraftService
             SyntaxTree? existing = result.SyntaxTrees.FirstOrDefault(tree => tree.FilePath.Equals(file, StringComparison.OrdinalIgnoreCase));
             CSharpParseOptions options = existing is CSharpSyntaxTree csharp
                 ? csharp.Options
-                : new CSharpParseOptions(LanguageVersion.Preview);
+                : baseline;
             SyntaxTree replacement = CSharpSyntaxTree.ParseText(last.ResultContent, options, path: file);
             result = existing == null
                 ? result.AddSyntaxTrees(replacement)
@@ -227,20 +746,34 @@ public static class DraftService
         out string description)
     {
         INamedTypeSymbol? type = SymbolLocator.FindType(compilation, typePath);
-        if (type == null)
+        if (type == null || !IsExactTypePath(type, typePath))
         {
             description = $"新建类型 {typePath}";
-            return [CreateNewType(project.Info, compilation, typePath, content)];
+            List<CodeChange> created = [];
+
+            // 新建嵌套类型时外层类型必须标 partial：新文件里外层也要带 partial，否则两边对不上
+            // （见测试 Stage_creates_a_nested_type_and_marks_the_outer_type_partial）。
+            int lastDot = typePath.LastIndexOf('.');
+            if (lastDot > 0)
+            {
+                INamedTypeSymbol? outer = SymbolLocator.FindType(compilation, typePath[..lastDot]);
+                if (outer != null)
+                {
+                    created.AddRange(EnsurePartial(outer));
+                }
+            }
+
+            created.Add(CreateNewType(project.Info, compilation, typePath, content));
+            return created;
         }
 
         string member = (memberName ?? "").Trim();
         IReadOnlyList<ISymbol> members = member.Length == 0 ? [] : SymbolLocator.FindMembers(type, member);
         if (members.Count > 1)
         {
-            string overloads = string.Join(
-                "\n",
-                members.Select(item => "  - " + item.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)));
-            throw new InvalidOperationException($"'{member}' 匹配到 {members.Count} 个重载，请带上参数列表消歧：\n{overloads}");
+            throw new InvalidOperationException(
+                $"'{member}' 匹配到 {members.Count} 个重载，请带上参数列表消歧：{Environment.NewLine}"
+                + MemberListRendering.DescribeOverloads(members));
         }
 
         List<CodeChange> changes = [];
@@ -267,8 +800,21 @@ public static class DraftService
         }
 
         description = $"在 {typePath} 新增成员 {member}";
-        changes.AddRange(EnsurePartial(type));
-        changes.Add(CodeEditor.ComputeAdd(type, content, before: "", format: true));
+        List<CodeChange> partials = EnsurePartial(type);
+        CodeChange added = CodeEditor.ComputeAdd(type, content, before: "", format: true);
+
+        // 落盘时每个文件只取**最后一条**改动，所以"同一文件里既要补 partial 又要加成员"
+        // 必须合成一条：在补完 partial 的内容上再加成员，否则前一条会被后一条盖掉。
+        CodeChange? sameFile = partials.FirstOrDefault(
+            change => change.FilePath.Equals(added.FilePath, StringComparison.OrdinalIgnoreCase));
+        if (sameFile != null)
+        {
+            partials.Remove(sameFile);
+            added = CodeEditor.ComputeAddToSource(sameFile.FilePath, sameFile.NewContent, typePath, content, format: true);
+        }
+
+        changes.AddRange(partials);
+        changes.Add(added);
         return changes;
     }
 
@@ -292,23 +838,20 @@ public static class DraftService
 
         foreach (KeyValuePair<string, List<SyntaxNode>> pair in perFile)
         {
-            SyntaxNode updated = pair.Value[0].SyntaxTree.GetRoot();
-            bool touched = false;
-            foreach (SyntaxNode node in pair.Value)
+            // 同一个文件里可能有**多处**该类型的声明（分部类）→ 必须一次替换多处：
+            // 逐个 ReplaceNode 的话，第二个节点已经不在替换后的新树里了
+            List<TypeDeclarationSyntax> pending =
+            [
+                .. pair.Value.OfType<TypeDeclarationSyntax>().Where(declaration => !HasPartial(declaration)),
+            ];
+            if (pending.Count == 0)
             {
-                if (node is not TypeDeclarationSyntax declaration || HasPartial(declaration))
-                {
-                    continue;
-                }
-
-                updated = updated.ReplaceNode(node, AddPartial(declaration));
-                touched = true;
+                continue;
             }
 
-            if (touched)
-            {
-                changes.Add(new CodeChange(pair.Key, updated.ToFullString(), 0, 0, "补 partial"));
-            }
+            SyntaxNode updated = pair.Value[0].SyntaxTree.GetRoot()
+                .ReplaceNodes(pending, (original, _) => AddPartial((TypeDeclarationSyntax)original));
+            changes.Add(new CodeChange(pair.Key, updated.ToFullString(), 0, 0, "补 partial"));
         }
 
         return changes;
@@ -337,7 +880,8 @@ public static class DraftService
             {
                 string outerFile = reference.SyntaxTree.FilePath;
                 string nestedDirectory = Path.GetDirectoryName(outerFile) ?? info.ProjectDirectory;
-                string nestedPath = Path.Combine(nestedDirectory, typeName + ".cs");
+                // 需求：内部类用 Outer.Inner.cs 作文件名
+                string nestedPath = Path.Combine(nestedDirectory, $"{outer.Name}.{typeName}.cs");
                 return new CodeChange(nestedPath, BuildNestedTypeSource(outer, typeName, content), 0, 0, "新建内部类");
             }
         }
@@ -569,16 +1113,46 @@ public static class DraftService
         return text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "";
     }
 
+    /// <summary>
+    /// 项目的根命名空间：先看 csproj 里的 <c>RootNamespace</c>；**没写就用项目名**
+    /// （MSBuild 的默认值就是项目名），否则新建类型的文件会多出一层目录（<c>Demo\Demo\X.cs</c>）。
+    /// </summary>
     private static string ReadRootNamespace(string projectPath)
     {
         try
         {
             XElement? root = XDocument.Load(projectPath).Root;
-            return root == null ? "" : ProjectFileInfo.ReadProperty(root, "RootNamespace");
+            string declared = root == null ? "" : ProjectFileInfo.ReadProperty(root, "RootNamespace");
+            if (declared.Length > 0)
+            {
+                return declared;
+            }
         }
         catch (System.Xml.XmlException)
         {
-            return "";
+            // 读不动就当没写，走下面的回退
         }
+
+        return Path.GetFileNameWithoutExtension(projectPath);
+    }
+
+    /// <summary>拟定条目的显示名：新建类型没有成员名，别显示成 <c>Demo.NewType.</c>。</summary>
+    internal static string EditLabel(DraftEdit edit)
+    {
+        return edit.MemberName.Length == 0 ? edit.TypePath : $"{edit.TypePath}.{edit.MemberName}";
+    }
+
+    /// <summary>预检查结论的中文说明（工具输出，供调用方判断"这次落盘会不会卡在占用上"）。</summary>
+    private static string DescribeProbe(WriteProbe probe)
+    {
+        return probe switch
+        {
+            WriteProbe.Writable => "✅ 可写",
+            WriteProbe.Busy => "⚠ 被占用（编辑器 / 杀软 / 索引服务可能持有它；落盘会退避重试，仍失败则报错）",
+            WriteProbe.ReadOnly => "⛔ 只读属性（去掉只读才能写）",
+            WriteProbe.Denied => "⛔ 没有写权限",
+            WriteProbe.DirectoryNotWritable => "⛔ 目录不可写（新建文件需要可写目录）",
+            _ => "⚠ 未知状态",
+        };
     }
 }

@@ -69,7 +69,10 @@ public static class MsBuildEvaluator
 
     private static readonly ConcurrentDictionary<string, CacheEntry> Cache = new(StringComparer.OrdinalIgnoreCase);
 
-    private sealed record CacheEntry(MsBuildEvaluation Evaluation, IReadOnlyDictionary<string, DateTime> InputTimestamps);
+    private sealed record CacheEntry(
+        MsBuildEvaluation Evaluation,
+        IReadOnlyDictionary<string, DateTime> InputTimestamps,
+        string SourceFingerprint);
 
     /// <summary>
     /// 求值一个项目。结果带缓存，输入文件出现 / 消失 / 变动后自动失效。
@@ -89,7 +92,8 @@ public static class MsBuildEvaluator
 
         if (!refresh &&
             Cache.TryGetValue(fullPath, out CacheEntry? cached) &&
-            !IsStale(fullPath, cached.InputTimestamps))
+            !IsStale(fullPath, cached.InputTimestamps) &&
+            cached.SourceFingerprint == SourceFingerprint(fullPath))
         {
             return cached.Evaluation;
         }
@@ -100,7 +104,7 @@ public static class MsBuildEvaluator
             Cache.Clear();
         }
 
-        Cache[fullPath] = new CacheEntry(evaluation, SnapshotInputs(fullPath));
+        Cache[fullPath] = new CacheEntry(evaluation, SnapshotInputs(fullPath), SourceFingerprint(fullPath));
         return evaluation;
     }
 
@@ -108,6 +112,84 @@ public static class MsBuildEvaluator
     public static void ClearCache()
     {
         Cache.Clear();
+    }
+
+    /// <summary>
+    /// 源文件指纹（文件数 + 最新写入时间）。
+    /// 新增 / 删除 / 改动 <c>.cs</c> 也要让缓存失效 —— MSBuild 的 <c>Compile</c> 项来自 glob，
+    /// 新文件不会体现在 <see cref="WatchedFileNames"/> 那些"监视文件"里，
+    /// 否则刚落盘的新类型在本次会话里会一直看不到。
+    /// </summary>
+    internal static string SourceFingerprint(string projectPath)
+    {
+        string directory = Path.GetDirectoryName(Path.GetFullPath(projectPath)) ?? ".";
+        int count = 0;
+        long latest = 0;
+        foreach (string file in EnumerateSourceFiles(directory))
+        {
+            count++;
+            try
+            {
+                long ticks = File.GetLastWriteTimeUtc(file).Ticks;
+                if (ticks > latest)
+                {
+                    latest = ticks;
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                // 读不到就只记数，不影响"有变化就失效"的判断
+            }
+        }
+
+        return $"{count}:{latest}";
+    }
+
+    /// <summary>递归枚举项目目录下的 <c>.cs</c>（跳过 <c>bin</c> / <c>obj</c>）。</summary>
+    private static IEnumerable<string> EnumerateSourceFiles(string directory)
+    {
+        Stack<string> pending = new();
+        pending.Push(directory);
+        while (pending.Count > 0)
+        {
+            string current = pending.Pop();
+            string[] files;
+            try
+            {
+                files = Directory.GetFiles(current, "*.cs");
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                continue;
+            }
+
+            foreach (string file in files)
+            {
+                yield return file;
+            }
+
+            string[] subdirectories;
+            try
+            {
+                subdirectories = Directory.GetDirectories(current);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                continue;
+            }
+
+            foreach (string subdirectory in subdirectories)
+            {
+                string name = Path.GetFileName(subdirectory);
+                if (name.Equals("bin", StringComparison.OrdinalIgnoreCase) ||
+                    name.Equals("obj", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                pending.Push(subdirectory);
+            }
+        }
     }
 
     /// <summary>给候选输入文件拍一份时间戳快照（只记存在的文件）。</summary>
@@ -178,7 +260,9 @@ public static class MsBuildEvaluator
             "-nologo",
             "-v:q",
             "-t:ResolveReferences",
-            "-getProperty:TargetFramework,DefineConstants,AssemblyName,RootNamespace,Nullable,ProjectAssetsFile",
+            // MSBuildProjectExtensionsPath = obj 的真实位置（可能被 BaseIntermediateOutputPath 重定向），
+            // 调用方靠它定位 *.nuget.g.props|targets，而不是硬编码 <项目目录>/obj/
+            "-getProperty:TargetFramework,DefineConstants,AssemblyName,RootNamespace,Nullable,ProjectAssetsFile,MSBuildProjectExtensionsPath",
             "-getItem:Compile,ReferencePath",
         ];
 

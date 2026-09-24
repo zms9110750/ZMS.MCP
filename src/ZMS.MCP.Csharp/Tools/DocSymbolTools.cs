@@ -64,19 +64,39 @@ public static class DocSymbolTools
             return builder.ToString();
         }
 
-        foreach (DocEntry entry in result.Entries)
+        if (result.EffectiveKinds.Contains('D'))
         {
-            if (result.EffectiveKinds.Contains('D'))
+            // D：给原始 XML 片段（可以有多条，比如显式 type=D 查一个类型）
+            foreach (DocEntry entry in result.Entries)
             {
-                // D：给原始 XML 片段（可以有多条，比如显式 type=D 查一个类型）
                 builder.AppendLine("```xml");
                 builder.AppendLine(entry.Xml);
                 builder.AppendLine("```");
+            }
+
+            return builder.ToString();
+        }
+
+        // 不含 D 时**只列成员**（文档注释只在 D 时才给）；
+        // 同名重载超过 10 个 → 分组显示、不重复方法名（需求 3.7）
+        foreach (IGrouping<string, DocEntry> grouping in result.Entries.GroupBy(entry => entry.Prefix))
+        {
+            List<DocEntry> items = [.. grouping];
+            if (items.Count > MemberListRendering.OverloadGroupThreshold && items[0].Kind == 'M')
+            {
+                builder.AppendLine($"- `{items[0].Prefix}` 有 {items.Count} 个重载：");
+                foreach (DocEntry entry in items)
+                {
+                    builder.AppendLine($"  - `({entry.Parameters})`");
+                }
+
                 continue;
             }
 
-            string summary = entry.Summary.Length == 0 ? "" : $" — {entry.Summary}";
-            builder.AppendLine($"- `{entry.MemberName}`{summary}");
+            foreach (DocEntry entry in items)
+            {
+                builder.AppendLine($"- `{entry.MemberName}`");
+            }
         }
 
         return builder.ToString();

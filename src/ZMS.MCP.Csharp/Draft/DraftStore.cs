@@ -16,13 +16,22 @@ public sealed record DraftEdit(
     string FilePath,
     string BaselineHash,
     string ResultContent,
-    string Action)
+    string Action,
+    string SymbolKey = "",
+    string SymbolSnapshot = "")
 {
     public bool IsDelete => RequestedContent == null;
 }
 
 /// <summary>一个项目上的拟定。</summary>
 public sealed record DraftRecord(string ProjectPath, string Cookit, string CreatedAt, IReadOnlyList<DraftEdit> Edits);
+
+/// <summary>一个项目的追踪记录：追踪 cookie + 符号级基线。</summary>
+public sealed record TrackingRecord(
+    string ProjectPath,
+    string TrackingCookie,
+    IReadOnlyDictionary<string, string> Baseline,
+    string CreatedAt);
 
 /// <summary>
 /// 拟定状态的持久化：**sqlite 放在 MCP 自己的目录**（<see cref="McpPaths.DataDirectory"/>），不进项目。
@@ -71,7 +80,9 @@ public sealed class DraftStore
         string filePath,
         string baselineHash,
         string resultContent,
-        string action)
+        string action,
+        string symbolKey = "",
+        string symbolSnapshot = "")
     {
         string normalized = Normalize(projectPath);
         DraftRecord record = GetOrCreate(normalized);
@@ -79,12 +90,7 @@ public sealed class DraftStore
 
         using SqliteConnection connection = Open();
         using SqliteCommand command = connection.CreateCommand();
-        command.CommandText =
-            """
-            INSERT INTO draft_edits (project_path, seq, type_path, member_name, content, file_path, baseline_hash, result_content, action)
-            VALUES ($project, $seq, $type, $member, $content, $file, $hash, $result, $action);
-            SELECT last_insert_rowid();
-            """;
+        command.CommandText = InsertSql;
         command.Parameters.AddWithValue("$project", normalized);
         command.Parameters.AddWithValue("$seq", sequence);
         command.Parameters.AddWithValue("$type", typePath);
@@ -94,9 +100,122 @@ public sealed class DraftStore
         command.Parameters.AddWithValue("$hash", baselineHash);
         command.Parameters.AddWithValue("$result", resultContent);
         command.Parameters.AddWithValue("$action", action);
+        command.Parameters.AddWithValue("$symbol", symbolKey);
+        command.Parameters.AddWithValue("$snapshot", symbolSnapshot);
         long id = Convert.ToInt64(command.ExecuteScalar());
 
-        return new DraftEdit(id, sequence, typePath, memberName, requestedContent, filePath, baselineHash, resultContent, action);
+        return new DraftEdit(id, sequence, typePath, memberName, requestedContent, filePath, baselineHash, resultContent, action, symbolKey, symbolSnapshot);
+    }
+
+    /// <summary>
+    /// 同一个符号**只保留一条生效条目**：先删它的旧条目，再插新的一条。
+    /// `keepFirstSnapshot`：`stage` 传 true（沿用首次快照，冲突检测才有效）；
+    /// 选择器（select_draft）传 false（用选中内容与**当前**文本当快照，否则冲突永远消不掉）。
+    /// </summary>
+    public DraftEdit ReplaceSymbol(
+        string projectPath,
+        string typePath,
+        string memberName,
+        string? requestedContent,
+        string symbolKey,
+        string symbolSnapshot,
+        string action,
+        bool keepFirstSnapshot = true)
+    {
+        string normalized = Normalize(projectPath);
+
+        // 沿用**首次**快照：同符号第二次 stage 若把快照刷成"当下"，冲突检测就永远看不出来了
+        string snapshot = symbolSnapshot;
+        if (keepFirstSnapshot && symbolSnapshot.Length > 0)
+        {
+            using SqliteConnection connection = Open();
+            using SqliteCommand read = connection.CreateCommand();
+            read.CommandText =
+                "SELECT symbol_snapshot FROM draft_edits WHERE project_path = $project AND symbol_key = $symbol "
+                + "ORDER BY rowid DESC LIMIT 1;";
+            read.Parameters.AddWithValue("$project", normalized);
+            read.Parameters.AddWithValue("$symbol", symbolKey);
+            if (read.ExecuteScalar() is string existing && existing.Length > 0)
+            {
+                snapshot = existing;
+            }
+        }
+
+        // 删旧 + 插新必须在**同一连接同一事务**里：否则删成功、插失败会静默丢掉这个符号的拟定条目
+        DraftRecord record = GetOrCreate(normalized);
+        int sequence = record.Edits.Count == 0 ? 1 : record.Edits.Max(edit => edit.Sequence) + 1;
+
+        using (SqliteConnection connection = Open())
+        {
+            using SqliteTransaction transaction = connection.BeginTransaction();
+
+            using (SqliteCommand delete = connection.CreateCommand())
+            {
+                delete.Transaction = transaction;
+                delete.CommandText = "DELETE FROM draft_edits WHERE project_path = $project AND symbol_key = $symbol;";
+                delete.Parameters.AddWithValue("$project", normalized);
+                delete.Parameters.AddWithValue("$symbol", symbolKey);
+                delete.ExecuteNonQuery();
+            }
+
+            using SqliteCommand insert = connection.CreateCommand();
+            insert.Transaction = transaction;
+            insert.CommandText = InsertSql;
+            insert.Parameters.AddWithValue("$project", normalized);
+            insert.Parameters.AddWithValue("$seq", sequence);
+            insert.Parameters.AddWithValue("$type", typePath);
+            insert.Parameters.AddWithValue("$member", memberName);
+            insert.Parameters.AddWithValue("$content", requestedContent == null ? DBNull.Value : requestedContent);
+            insert.Parameters.AddWithValue("$file", "");
+            insert.Parameters.AddWithValue("$hash", "");
+            insert.Parameters.AddWithValue("$result", "");
+            insert.Parameters.AddWithValue("$action", action);
+            insert.Parameters.AddWithValue("$symbol", symbolKey);
+            insert.Parameters.AddWithValue("$snapshot", snapshot);
+            long id = Convert.ToInt64(insert.ExecuteScalar());
+
+            transaction.Commit();
+            return new DraftEdit(id, sequence, typePath, memberName, requestedContent, "", "", "", action, symbolKey, snapshot);
+        }
+    }
+
+    /// <summary>列出所有追踪记录（启动维护要按项目刷新基线）。</summary>
+    public IReadOnlyList<TrackingRecord> ListTrackings()
+    {
+        List<TrackingRecord> records = [];
+        using SqliteConnection connection = Open();
+        using SqliteCommand command = connection.CreateCommand();
+        command.CommandText = "SELECT project_path, tracking_cookie, symbol_baseline, created_at FROM trackings;";
+        using SqliteDataReader reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            records.Add(new TrackingRecord(
+                reader.GetString(0),
+                reader.GetString(1),
+                SymbolBaseline.Deserialize(reader.IsDBNull(2) ? "" : reader.GetString(2)),
+                reader.GetString(3)));
+        }
+
+        return records;
+    }
+
+    /// <summary>拟定条目的 INSERT（`Append` 与 `ReplaceSymbol` 共用，保证两处列与参数一致）。</summary>
+    private const string InsertSql =
+        """
+        INSERT INTO draft_edits (project_path, seq, type_path, member_name, content, file_path, baseline_hash, result_content, action, symbol_key, symbol_snapshot)
+        VALUES ($project, $seq, $type, $member, $content, $file, $hash, $result, $action, $symbol, $snapshot);
+        SELECT last_insert_rowid();
+        """;
+
+    /// <summary>删掉某个符号的拟定条目（选择器的 <c>drop</c>）；返回删了几条。</summary>
+    public int RemoveSymbol(string projectPath, string symbolKey)
+    {
+        using SqliteConnection connection = Open();
+        using SqliteCommand delete = connection.CreateCommand();
+        delete.CommandText = "DELETE FROM draft_edits WHERE project_path = $project AND symbol_key = $symbol;";
+        delete.Parameters.AddWithValue("$project", Normalize(projectPath));
+        delete.Parameters.AddWithValue("$symbol", symbolKey);
+        return delete.ExecuteNonQuery();
     }
 
     /// <summary>读这个项目的拟定（没有返回 null）。</summary>
@@ -117,8 +236,95 @@ public sealed class DraftStore
         command.ExecuteNonQuery();
     }
 
+    // ───────── 追踪记录（符号级基线） ─────────
+
+    /// <summary>读这个项目的追踪记录（没有返回 null）。</summary>
+    public TrackingRecord? GetTracking(string projectPath)
+    {
+        using SqliteConnection connection = Open();
+        using SqliteCommand command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT project_path, tracking_cookie, symbol_baseline, created_at FROM trackings WHERE project_path = $project;";
+        command.Parameters.AddWithValue("$project", Normalize(projectPath));
+        using SqliteDataReader reader = command.ExecuteReader();
+        if (!reader.Read())
+        {
+            return null;
+        }
+
+        return new TrackingRecord(
+            reader.GetString(0),
+            reader.GetString(1),
+            SymbolBaseline.Deserialize(reader.GetString(2)),
+            reader.GetString(3));
+    }
+
+    /// <summary>
+    /// 建追踪记录；已存在时**只刷新基线**（"已经在追踪就不重记"由调用方判断）。
+    /// </summary>
+    public TrackingRecord SaveTracking(string projectPath, string cookie, IReadOnlyDictionary<string, string> baseline)
+    {
+        string normalized = Normalize(projectPath);
+        using SqliteConnection connection = Open();
+        using (SqliteCommand insert = connection.CreateCommand())
+        {
+            insert.CommandText =
+                """
+                INSERT INTO trackings (project_path, tracking_cookie, symbol_baseline, created_at)
+                VALUES ($project, $cookie, $baseline, $created)
+                ON CONFLICT(project_path) DO UPDATE SET symbol_baseline = excluded.symbol_baseline;
+                """;
+            insert.Parameters.AddWithValue("$project", normalized);
+            insert.Parameters.AddWithValue("$cookie", cookie);
+            insert.Parameters.AddWithValue("$baseline", SymbolBaseline.Serialize(baseline));
+            insert.Parameters.AddWithValue("$created", DateTimeOffset.UtcNow.ToString("O"));
+            insert.ExecuteNonQuery();
+        }
+
+        return GetTracking(normalized) ?? throw new InvalidOperationException($"追踪记录写入失败：{normalized}");
+    }
+
+    /// <summary>取消追踪：**一个事务里**删掉追踪记录 + 该项目的全部拟定（写前日志另行处理，不在这里静默删）。</summary>
+    public void ClearTracking(string projectPath)
+    {
+        string normalized = Normalize(projectPath);
+        using SqliteConnection connection = Open();
+        using SqliteTransaction transaction = connection.BeginTransaction();
+        using (SqliteCommand command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText =
+                """
+                DELETE FROM draft_edits WHERE project_path = $project;
+                DELETE FROM drafts WHERE project_path = $project;
+                DELETE FROM trackings WHERE project_path = $project;
+                """;
+            command.Parameters.AddWithValue("$project", normalized);
+            command.ExecuteNonQuery();
+        }
+
+        transaction.Commit();
+    }
+
+    /// <summary>这个项目有没有未完成的写前日志（靠 <c>drafts</c> 里的 cookit 关联）。</summary>
+    public bool HasPendingJournal(string projectPath)
+    {
+        using SqliteConnection connection = Open();
+        using SqliteCommand command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT COUNT(*) FROM write_journal
+            WHERE cookit IN (SELECT cookit FROM drafts WHERE project_path = $project);
+            """;
+        command.Parameters.AddWithValue("$project", Normalize(projectPath));
+        return Convert.ToInt64(command.ExecuteScalar()) > 0;
+    }
+
+    /// <summary>写前日志的一条：要写的文件、新内容、**写之前**的文件 hash 与编码（前滚靠它判三态）。</summary>
+    public sealed record JournalEntry(string FilePath, string NewContent, string PreviousHash, string Encoding);
+
     /// <summary>多文件落盘前记录"打算写什么"（不是真原子，崩溃后靠它前滚补齐）。</summary>
-    public void RecordJournal(string cookit, IReadOnlyList<KeyValuePair<string, string>> files)
+    public void RecordJournal(string cookit, IReadOnlyList<JournalEntry> entries)
     {
         using SqliteConnection connection = Open();
         using (SqliteCommand clear = connection.CreateCommand())
@@ -129,34 +335,58 @@ public sealed class DraftStore
         }
 
         int sequence = 0;
-        foreach (KeyValuePair<string, string> file in files)
+        foreach (JournalEntry entry in entries)
         {
             using SqliteCommand command = connection.CreateCommand();
             command.CommandText =
-                "INSERT INTO write_journal (cookit, seq, file_path, content) VALUES ($cookit, $seq, $file, $content);";
+                "INSERT INTO write_journal (cookit, seq, file_path, content, previous_hash, encoding) "
+                + "VALUES ($cookit, $seq, $file, $content, $hash, $encoding);";
             command.Parameters.AddWithValue("$cookit", cookit);
             command.Parameters.AddWithValue("$seq", sequence++);
-            command.Parameters.AddWithValue("$file", file.Key);
-            command.Parameters.AddWithValue("$content", file.Value);
+            command.Parameters.AddWithValue("$file", entry.FilePath);
+            command.Parameters.AddWithValue("$content", entry.NewContent);
+            command.Parameters.AddWithValue("$hash", entry.PreviousHash);
+            command.Parameters.AddWithValue("$encoding", entry.Encoding);
             command.ExecuteNonQuery();
         }
     }
 
-    /// <summary>读回未完成的写前日志。</summary>
-    public IReadOnlyList<KeyValuePair<string, string>> ReadJournal(string cookit)
+    /// <summary>所有还没清掉的写前日志的 cookit（启动时用它前滚补齐未写完的落盘）。</summary>
+    public IReadOnlyList<string> JournalCookits()
     {
         using SqliteConnection connection = Open();
         using SqliteCommand command = connection.CreateCommand();
-        command.CommandText = "SELECT file_path, content FROM write_journal WHERE cookit = $cookit ORDER BY seq;";
-        command.Parameters.AddWithValue("$cookit", cookit);
+        command.CommandText = "SELECT DISTINCT cookit FROM write_journal ORDER BY cookit;";
         using SqliteDataReader reader = command.ExecuteReader();
-        List<KeyValuePair<string, string>> files = [];
+        List<string> cookits = [];
         while (reader.Read())
         {
-            files.Add(new KeyValuePair<string, string>(reader.GetString(0), reader.GetString(1)));
+            cookits.Add(reader.GetString(0));
         }
 
-        return files;
+        return cookits;
+    }
+
+    /// <summary>读回未完成的写前日志（含写前 hash 与编码，供三态判断）。</summary>
+    public IReadOnlyList<JournalEntry> ReadJournal(string cookit)
+    {
+        using SqliteConnection connection = Open();
+        using SqliteCommand command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT file_path, content, previous_hash, encoding FROM write_journal WHERE cookit = $cookit ORDER BY seq;";
+        command.Parameters.AddWithValue("$cookit", cookit);
+        using SqliteDataReader reader = command.ExecuteReader();
+        List<JournalEntry> entries = [];
+        while (reader.Read())
+        {
+            entries.Add(new JournalEntry(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.IsDBNull(2) ? "" : reader.GetString(2),
+                reader.IsDBNull(3) ? "" : reader.GetString(3)));
+        }
+
+        return entries;
     }
 
     /// <summary>清理写前日志（落盘完成后调用）。</summary>
@@ -236,9 +466,42 @@ public sealed class DraftStore
                 file_path TEXT NOT NULL,
                 content   TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS trackings (
+                project_path    TEXT PRIMARY KEY,
+                tracking_cookie TEXT NOT NULL,
+                symbol_baseline TEXT NOT NULL,
+                created_at      TEXT NOT NULL
+            );
             """;
         schema.ExecuteNonQuery();
+
+        // 旧库补列：sqlite 没有 ADD COLUMN IF NOT EXISTS，先问 PRAGMA table_info（幂等）
+        EnsureColumn(connection, "draft_edits", "symbol_snapshot", "TEXT NULL");
+        EnsureColumn(connection, "draft_edits", "symbol_key", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(connection, "write_journal", "previous_hash", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(connection, "write_journal", "encoding", "TEXT NOT NULL DEFAULT ''");
         return connection;
+    }
+
+    /// <summary>旧库补列：缺了才 <c>ALTER TABLE</c>，已经有了就直接返回。</summary>
+    private static void EnsureColumn(SqliteConnection connection, string table, string column, string definition)
+    {
+        using (SqliteCommand pragma = connection.CreateCommand())
+        {
+            pragma.CommandText = $"PRAGMA table_info({table});";
+            using SqliteDataReader reader = pragma.ExecuteReader();
+            while (reader.Read())
+            {
+                if (string.Equals(reader.GetString(1), column, StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+            }
+        }
+
+        using SqliteCommand alter = connection.CreateCommand();
+        alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition};";
+        alter.ExecuteNonQuery();
     }
 
     private static DraftRecord? Read(SqliteConnection connection, string projectPath)
@@ -260,7 +523,7 @@ public sealed class DraftStore
             using SqliteCommand edits = connection.CreateCommand();
             edits.CommandText =
                 """
-                SELECT id, seq, type_path, member_name, content, file_path, baseline_hash, result_content, action
+                SELECT id, seq, type_path, member_name, content, file_path, baseline_hash, result_content, action, symbol_key, symbol_snapshot
                 FROM draft_edits WHERE project_path = $project ORDER BY seq;
                 """;
             edits.Parameters.AddWithValue("$project", projectPath);
@@ -277,7 +540,9 @@ public sealed class DraftStore
                     editReader.GetString(5),
                     editReader.GetString(6),
                     editReader.GetString(7),
-                    editReader.GetString(8)));
+                    editReader.GetString(8),
+                    editReader.IsDBNull(9) ? "" : editReader.GetString(9),
+                    editReader.IsDBNull(10) ? "" : editReader.GetString(10)));
             }
 
             return new DraftRecord(projectPath, cookit, createdAt, list);

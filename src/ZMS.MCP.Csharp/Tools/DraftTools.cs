@@ -11,6 +11,22 @@ namespace ZMS.MCP.Csharp.Tools;
 [McpServerToolType]
 public static class DraftTools
 {
+    [McpServerTool(ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false)]
+    [Description(
+        "Track a project, or clear its tracking — one tool, two uses. " +
+        "Without cookie: the first call records a symbol-level snapshot and returns a tracking cookie; later calls keep that snapshot and only report. " +
+        "The report lists the pending draft edits and the untracked changes (symbols changed on disk outside this tool). " +
+        "With cookie: verifies it, then deletes this project's tracking snapshot and every pending draft edit — the only way to throw drafts away; " +
+        "a still-pending write-ahead journal is rolled forward first, never silently dropped. Editing drafts requires an active tracking session.")]
+    public static string TrackProject(
+        [Description("csproj path, or a unique project name")] string csprojPath,
+        [Description("The tracking cookie from a previous call; empty = start or resume tracking")] string cookie = "")
+    {
+        return ToolGuard.Run(() => string.IsNullOrWhiteSpace(cookie)
+            ? TrackingService.Track(csprojPath)
+            : TrackingService.Untrack(csprojPath, cookie));
+    }
+
     [McpServerTool(ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
     [Description(
         "Stage an add/modify/delete of a member inside a draft (drafts accumulate: repeated calls stack on the same draft). " +
@@ -38,16 +54,29 @@ public static class DraftTools
 
     [McpServerTool(ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]
     [Description(
-        "Confirm a draft: lists the changes grouped by add/delete and the diagnostics delta " +
-        "(paired by code + message + file, line numbers only for display), and prints the cookit. " +
-        "Passing a matching cookit WRITES the changes to disk; then the changed files are formatted with " +
-        "dotnet format --include, and no git operation is performed at all. " +
-        "Files changed externally during the draft are reported as conflicts and refused.")]
+        "Confirm a draft. Without applyCookie: rebuilds the symbol tree, locates each symbol's file, runs the pre-check " +
+        "(file busy / symbol conflict / file bytes) and, when clean, returns an in-memory applyCookie plus the files it would touch. " +
+        "With that applyCookie: re-checks that every symbol still lives in the same file and that the file bytes are unchanged, " +
+        "then writes (journal -> atomic write -> clear journal/draft/permits -> dotnet format -> recompute tracking baseline). No git operation is performed.")]
     public static string ConfirmDraft(
         [Description("csproj path, or a unique project name")] string csprojPath,
-        [Description("The cookit from stage/list; empty = dry run")] string cookit,
-        [Description("Set false to only preview even when the cookit matches")] bool apply = true)
+        [Description("applyCookie from the pre-check; empty = pre-check only")] string applyCookie,
+        [Description("Set false to only preview even when the cookie matches")] bool apply = true)
     {
-        return ToolGuard.Run(() => DraftService.Confirm(csprojPath, cookit, apply));
+        return ToolGuard.Run(() => DraftService.Confirm(csprojPath, applyCookie, apply));
+    }
+
+    [McpServerTool(ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]
+    [Description(
+        "Resolve one symbol's conflict using the selectCookie that get_member returned while that symbol had a conflict. " +
+        "choice = draft (keep the drafted content) / snapshot (restore the pre-edit content) / disk (take the current on-disk content) / " +
+        "drop (remove this symbol from the draft). Any applyCookie is invalidated afterwards.")]
+    public static string SelectDraft(
+        [Description("csproj path, or a unique project name")] string csprojPath,
+        [Description("Symbol path, e.g. 'My.Ns.Type.Member(int)'")] string memberPath,
+        [Description("The selectCookie returned by get_member")] string selectCookie,
+        [Description("draft / snapshot / disk / drop")] string choice)
+    {
+        return ToolGuard.Run(() => DraftService.Select(csprojPath, memberPath, selectCookie, choice));
     }
 }

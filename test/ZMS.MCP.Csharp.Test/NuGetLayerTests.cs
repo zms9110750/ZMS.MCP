@@ -265,6 +265,90 @@ public sealed class NuGetLayerTests
         Assert.Empty(PackageGraph.ReadProjectReferences(project));
     }
 
+    // ───────── 漏洞索引的在线形状（真实 index.json / 分片） ─────────
+
+    [Fact]
+    public void ReadShardUrls_reads_the_real_index_shape()
+    {
+        // 真实的 vulnerabilities/index.json 是**数组**，地址在 @id 里 ——
+        // 曾经按"对象 + vulnerabilities 数组 + 字符串"解析，于是永远拿不到分片（索引恒为不可用）
+        const string indexJson = """
+            [
+              { "@name": "base", "@id": "https://api.nuget.org/v3/vulnerabilities/vulnerability.base.json", "@updated": "2023-12-13T00:48:47.5745986Z" },
+              { "@name": "update", "@id": "https://api.nuget.org/v3/vulnerabilities/vulnerability.update.json", "comment": "periodic" }
+            ]
+            """;
+
+        Assert.Equal(
+            new[]
+            {
+                "https://api.nuget.org/v3/vulnerabilities/vulnerability.base.json",
+                "https://api.nuget.org/v3/vulnerabilities/vulnerability.update.json",
+            },
+            VulnerabilityIndex.ReadShardUrls(indexJson));
+        // 形状不对时不抛异常，只是取不到地址
+        Assert.Empty(VulnerabilityIndex.ReadShardUrls("""{ "vulnerabilities": [] }"""));
+    }
+
+    [Fact]
+    public void Merge_reads_shards_and_records_unparsable_versions()
+    {
+        const string shard = """
+            {
+              "microsoft.data.odata": [
+                { "url": "https://github.com/advisories/GHSA-mv2r-q4g5-j8q5", "severity": 2, "versions": "(, 5.8.4)" }
+              ],
+              "some.package": [
+                { "url": "https://github.com/advisories/GHSA-xxxx", "severity": 1, "versions": "not-a-range" }
+              ],
+              "no.versions": [ { "url": "https://github.com/advisories/GHSA-yyyy", "severity": 0 } ]
+            }
+            """;
+        Dictionary<string, List<string>> merged = new(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> unparsed = new(StringComparer.OrdinalIgnoreCase);
+
+        VulnerabilityIndex.Merge(merged, unparsed, shard);
+
+        Assert.Equal(new[] { "(, 5.8.4)" }, merged["microsoft.data.odata"]);
+        // 读不出区间的包按"未知风险"处理，不能静默当成安全
+        Assert.Contains("some.package", unparsed);
+        Assert.Contains("no.versions", unparsed);
+    }
+
+    [Fact]
+    public void IsVulnerable_handles_a_range_without_lower_bound()
+    {
+        // NuGet 索引里常见 (, 5.8.4)：全是"无下界 + 不含上界"
+        VulnerabilityIndexData data = Index(("microsoft.data.odata", ["(, 5.8.4)"]));
+
+        Assert.True(VulnerabilityIndex.IsVulnerable(data, "microsoft.data.odata", ComparableVersion.Parse("4.0.0")));
+        Assert.True(VulnerabilityIndex.IsVulnerable(data, "Microsoft.Data.Odata", ComparableVersion.Parse("5.8.3")));
+        Assert.False(VulnerabilityIndex.IsVulnerable(data, "microsoft.data.odata", ComparableVersion.Parse("5.8.4")));
+        Assert.False(VulnerabilityIndex.IsVulnerable(data, "microsoft.data.odata", ComparableVersion.Parse("7.0.0")));
+    }
+
+    // ───────── 落盘后的漏洞审计（NU1901–NU1904） ─────────
+
+    [Fact]
+    public void ExtractAuditWarnings_picks_only_the_nu190x_lines()
+    {
+        const string output = """
+            正在确定要还原的项目…
+            C:\x\Demo.csproj : warning NU1903: 包 "Newtonsoft.Json" 13.0.1 具有已知的 高 严重性漏洞
+            C:\x\Demo.csproj : warning NU1901: 包 "A" 1.0.0 具有已知的 低 严重性漏洞
+            C:\x\Demo.csproj : warning NU1903: 包 "Newtonsoft.Json" 13.0.1 具有已知的 高 严重性漏洞
+            已还原 C:\x\Demo.csproj (用时 200 毫秒)。
+            """;
+
+        IReadOnlyList<string> warnings = PackageManager.ExtractAuditWarnings(output);
+
+        // 只摘 NU1901–NU1904，且同样的行去重
+        Assert.Equal(2, warnings.Count);
+        Assert.Contains(warnings, line => line.Contains("NU1903", StringComparison.Ordinal));
+        Assert.Contains(warnings, line => line.Contains("NU1901", StringComparison.Ordinal));
+        Assert.DoesNotContain(warnings, line => line.Contains("已还原", StringComparison.Ordinal));
+    }
+
     // ───────── 包请求解析与版本选择 ─────────
 
     [Fact]

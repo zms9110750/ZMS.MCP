@@ -31,12 +31,12 @@ public static class SymbolLocator
         INamespaceSymbol? current = compilation.GlobalNamespace;
         for (int i = 0; i < parts.Length; i++)
         {
-            INamedTypeSymbol? type = current?.GetTypeMembers(parts[i]).FirstOrDefault();
+            INamedTypeSymbol? type = current == null ? null : PickType(trimmed, current.GetTypeMembers(), parts[i]);
             if (type != null)
             {
                 for (int j = i + 1; j < parts.Length; j++)
                 {
-                    INamedTypeSymbol? nested = type.GetTypeMembers(parts[j]).FirstOrDefault();
+                    INamedTypeSymbol? nested = PickType(trimmed, type.GetTypeMembers(), parts[j]);
                     if (nested == null)
                     {
                         break;
@@ -56,6 +56,55 @@ public static class SymbolLocator
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// 在候选类型里按名字挑一个：支持 <c>List</c> 与带元数的 <c>List`1</c> 两种写法。
+    /// 命中**多个**声明时不猜 —— 直接报"匹配到多个声明"（同名类型分处两个文件等）。
+    /// </summary>
+    private static INamedTypeSymbol? PickType(string path, IEnumerable<INamedTypeSymbol> candidates, string name)
+    {
+        List<INamedTypeSymbol> hits =
+        [
+            .. candidates.Where(type => type.Name.Equals(name, StringComparison.Ordinal)
+                || type.MetadataName.Equals(name, StringComparison.Ordinal)),
+        ];
+        if (hits.Count > 1)
+        {
+            throw new InvalidOperationException(
+                $"'{path}' 匹配到 {hits.Count} 个类型声明，请给出更完整的路径：{Environment.NewLine}"
+                + string.Join(Environment.NewLine, hits.Select(type => "  - " + type.ToDisplayString())));
+        }
+
+        return hits.Count == 1 ? hits[0] : null;
+    }
+
+    /// <summary>按**顶层**逗号切分参数类型：括号 / 尖括号里的逗号不算（如 <c>Dictionary&lt;int,string&gt;,int</c>）。</summary>
+    internal static List<string> SplitTopLevel(string text)
+    {
+        List<string> parts = [];
+        int depth = 0;
+        int start = 0;
+        for (int index = 0; index < text.Length; index++)
+        {
+            char current = text[index];
+            if (current is '(' or '<' or '[')
+            {
+                depth++;
+            }
+            else if (current is ')' or '>' or ']')
+            {
+                depth = Math.Max(0, depth - 1);
+            }
+            else if (current == ',' && depth == 0)
+            {
+                parts.Add(text[start..index].Trim());
+                start = index + 1;
+            }
+        }
+
+        parts.Add(text[start..].Trim());
+        return [.. parts.Where(part => part.Length > 0)];
     }
 
     /// <summary>
@@ -114,7 +163,7 @@ public static class SymbolLocator
             string inner = name[(bracket + 1)..^1].Trim();
             parameters = inner.Length == 0
                 ? []
-                : inner.Split(',').Select(parameter => parameter.Trim()).ToArray();
+                : [.. SplitTopLevel(inner)];
             name = name[..bracket].Trim();
         }
 
@@ -154,17 +203,23 @@ public static class SymbolLocator
 
         if (members.Count > 1)
         {
-            string overloads = string.Join("\n", members.Select(member => "  - " + member.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)));
-            throw new InvalidOperationException($"'{memberSpec}' matches {members.Count} overloads, add a parameter list to disambiguate:\n{overloads}");
+            throw new InvalidOperationException(
+                $"'{memberSpec}' matches {members.Count} overloads, add a parameter list to disambiguate:{Environment.NewLine}"
+                + MemberListRendering.DescribeOverloads(members));
         }
 
         return members[0];
     }
 
-    /// <summary>列出项目源码中声明的所有类型（完全限定名）。</summary>
-    public static IReadOnlyList<(INamedTypeSymbol Symbol, string FilePath, int Line)> ListTypes(Compilation compilation, string filter)
+    /// <summary>
+    /// 列出项目源码中声明的所有类型（完全限定名）+ **全部**声明位置。
+    /// 分部类（<c>partial</c>）的多个声明合并成一条，位置按文件与行号排序。
+    /// </summary>
+    public static IReadOnlyList<(INamedTypeSymbol Symbol, IReadOnlyList<(string FilePath, int Line)> Locations)> ListTypes(
+        Compilation compilation,
+        string filter)
     {
-        List<(INamedTypeSymbol, string, int)> results = [];
+        Dictionary<INamedTypeSymbol, List<(string FilePath, int Line)>> collected = new(SymbolEqualityComparer.Default);
         foreach (SyntaxTree tree in compilation.SyntaxTrees)
         {
             SemanticModel model = compilation.GetSemanticModel(tree);
@@ -187,13 +242,27 @@ public static class SymbolLocator
                 }
 
                 FileLinePositionSpan span = node.GetLocation().GetLineSpan();
-                results.Add((symbol, span.Path, span.StartLinePosition.Line + 1));
+                if (!collected.TryGetValue(symbol, out List<(string FilePath, int Line)>? locations))
+                {
+                    locations = [];
+                    collected[symbol] = locations;
+                }
+
+                locations.Add((span.Path, span.StartLinePosition.Line + 1));
             }
         }
 
-        return results
-            .OrderBy(item => item.Item2, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(item => item.Item3)
+        return collected
+            .Select(pair => (
+                Symbol: pair.Key,
+                Locations: (IReadOnlyList<(string FilePath, int Line)>)
+                [
+                    .. pair.Value
+                        .OrderBy(item => item.FilePath, StringComparer.OrdinalIgnoreCase)
+                        .ThenBy(item => item.Line),
+                ]))
+            .OrderBy(item => item.Locations[0].FilePath, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(item => item.Locations[0].Line)
             .ToList();
     }
 

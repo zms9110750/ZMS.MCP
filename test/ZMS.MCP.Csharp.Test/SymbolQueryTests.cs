@@ -260,7 +260,7 @@ public sealed class SymbolQueryTests
     {
         string output = SymbolTools.ListSymbols(SelfProjectPath(), "Cx", "", "");
 
-        Assert.Contains("无法识别的 kind 字母", output);
+        Assert.Contains("无法识别的 type 字母", output);
         Assert.Contains("X", output);
     }
 }

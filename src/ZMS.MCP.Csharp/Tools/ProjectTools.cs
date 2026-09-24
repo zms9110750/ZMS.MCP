@@ -16,16 +16,16 @@ public static class ProjectTools
         "then the projects that exist under the solution folder but are NOT described by it, prefixed with '-'. " +
         "Projects not covered by any solution follow as plain lines. bin/obj/.git are skipped.")]
     public static string ScanProjects(
-        [Description("Absolute folder path to scan")] string folder,
+        [Description("Absolute path of the folder to scan")] string path,
         [Description("Max recursion depth (default 4)")] int depth = 4,
         [Description("Kinds to include, comma separated: sln,slnx,csproj. Empty = all three")] string kinds = "")
     {
         return ToolGuard.Run(() =>
         {
-            ScanResult result = SolutionExplorer.ScanTree(folder, depth, kinds);
+            ScanResult result = SolutionExplorer.ScanTree(path, depth, kinds);
             if (result.Solutions.Count == 0 && result.LooseProjects.Count == 0)
             {
-                return $"No solution/project files under {Path.GetFullPath(folder)} (depth {depth}).";
+                return $"No solution/project files under {Path.GetFullPath(path)} (depth {depth}).";
             }
 
             StringBuilder builder = new();
@@ -57,65 +57,32 @@ public static class ProjectTools
         });
     }
 
-    [McpServerTool(ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
-    [Description("List the projects inside a solution (.sln or .slnx).")]
-    public static string ListSolutionProjects(
-        [Description("Path to the .sln or .slnx file")] string solutionPath)
-    {
-        return ToolGuard.Run(() =>
-        {
-            string fullPath = Path.GetFullPath(solutionPath);
-            IReadOnlyList<SolutionProject> projects = SolutionExplorer.ReadProjects(fullPath);
-            StringBuilder builder = new();
-            builder.AppendLine($"# {fullPath}");
-            builder.AppendLine();
-            if (projects.Count == 0)
-            {
-                builder.AppendLine("_(no projects)_");
-                return builder.ToString();
-            }
-
-            builder.AppendLine($"{projects.Count} project(s):");
-            builder.AppendLine();
-            foreach (SolutionProject project in projects)
-            {
-                string missing = File.Exists(project.AbsolutePath) ? "" : "  _(missing on disk)_";
-                builder.AppendLine($"- `{project.Name}` → `{project.RelativePath}`{missing}");
-            }
-
-            return builder.ToString();
-        });
-    }
-
     [McpServerTool(ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false)]
-    [Description("Add an existing project to a solution via 'dotnet sln add'.")]
+    [Description(
+        "Add an existing project to a .slnx via 'dotnet sln add'. " +
+        "Editing solutions is only supported for .slnx — a .sln is refused, migrate it first. " +
+        "Folder puts the project into that virtual folder of the slnx (empty = solution root). " +
+        "The project must already exist; creating projects is not a tool here, run the CLI yourself.")]
     public static async Task<string> AddProjectToSolution(
-        [Description("Path to the .sln or .slnx file")] string solutionPath,
-        [Description("Path to the project file to add")] string projectPath)
+        [Description("Path to the .slnx file")] string slnxPath,
+        [Description("Path to the project file to add (must already exist)")] string csprojPath,
+        [Description("Virtual folder inside the slnx, e.g. 'src/Core' (empty = root)")] string folder = "")
     {
-        (int exitCode, string output) = await SolutionExplorer.AddProjectToSolution(solutionPath, projectPath);
-        return FormatDotnetResult(exitCode, output, $"Added {Path.GetFullPath(projectPath)} to {Path.GetFullPath(solutionPath)}");
+        (int exitCode, string output) = await SolutionExplorer.AddProjectToSolution(slnxPath, csprojPath, folder);
+        string target = string.IsNullOrWhiteSpace(folder)
+            ? Path.GetFullPath(slnxPath)
+            : $"{Path.GetFullPath(slnxPath)}（/{folder.Trim().Replace('\\', '/').Trim('/')}/）";
+        return FormatDotnetResult(exitCode, output, $"Added {Path.GetFullPath(csprojPath)} to {target}");
     }
 
     [McpServerTool(ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false)]
-    [Description("Remove a project from a solution via 'dotnet sln remove'.")]
+    [Description("Remove a project from a .slnx via 'dotnet sln remove'. Editing solutions is only supported for .slnx.")]
     public static async Task<string> RemoveProjectFromSolution(
-        [Description("Path to the .sln or .slnx file")] string solutionPath,
-        [Description("Path to the project file to remove")] string projectPath)
+        [Description("Path to the .slnx file")] string slnxPath,
+        [Description("Path to the project file to remove")] string csprojPath)
     {
-        (int exitCode, string output) = await SolutionExplorer.RemoveProjectFromSolution(solutionPath, projectPath);
-        return FormatDotnetResult(exitCode, output, $"Removed {Path.GetFullPath(projectPath)} from {Path.GetFullPath(solutionPath)}");
-    }
-
-    [McpServerTool(ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
-    [Description("Create a new dotnet project with 'dotnet new' (e.g. template=classlib, console, xunit).")]
-    public static async Task<string> CreateProject(
-        [Description("Folder to create the project in")] string folder,
-        [Description("Project name")] string name,
-        [Description("dotnet new template short name (default classlib)")] string template = "classlib")
-    {
-        (int exitCode, string output) = await SolutionExplorer.CreateProject(folder, name, template);
-        return FormatDotnetResult(exitCode, output, $"Created {name} ({template}) in {Path.GetFullPath(folder)}");
+        (int exitCode, string output) = await SolutionExplorer.RemoveProjectFromSolution(slnxPath, csprojPath);
+        return FormatDotnetResult(exitCode, output, $"Removed {Path.GetFullPath(csprojPath)} from {Path.GetFullPath(slnxPath)}");
     }
 
     private static string FormatDotnetResult(int exitCode, string output, string successMessage)

@@ -121,9 +121,20 @@ public static class NuGetTools
 
             StringBuilder builder = new();
             builder.AppendLine($"# {packName}（{source}）");
-            builder.AppendLine(
-                $"> 共筛选到 {shown.Count} 个版本，还有 {matched.Count - shown.Count} 个版本未列出"
-                + (includePrerelease ? $"，其中预览版 {prerelease.Count} 个" : ""));
+            if (includePrerelease)
+            {
+                // 预览版为 0 时就别写"其中预览版 0 个"
+                builder.AppendLine(prerelease.Count > 0
+                    ? $"> 共查询到 {shown.Count} 个版本，其中预览版 {prerelease.Count} 个"
+                    : $"> 共查询到 {shown.Count} 个版本");
+            }
+            else
+            {
+                int leftOut = matched.Count - shown.Count;
+                builder.AppendLine(leftOut > 0
+                    ? $"> 共筛选到 {shown.Count} 个版本，还有 {leftOut} 个预览版未列出"
+                    : $"> 共筛选到 {shown.Count} 个版本");
+            }
             builder.AppendLine();
             foreach (ComparableVersion version in shown)
             {

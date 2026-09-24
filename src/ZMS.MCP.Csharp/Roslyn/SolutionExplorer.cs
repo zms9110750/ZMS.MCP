@@ -338,25 +338,55 @@ public static class SolutionExplorer
         return projects;
     }
 
-    public static Task<(int ExitCode, string Output)> AddProjectToSolution(string solutionPath, string projectPath)
+    /// <summary>
+    /// 把已有项目加入解决方案（<c>dotnet sln &lt;slnx&gt; add &lt;csproj&gt;</c>）。
+    /// 编辑解决方案只支持 slnx（见需求文档），所以 .sln 会直接被拒绝；
+    /// <paramref name="folder"/> 非空时用 <c>--solution-folder</c> 把项目放进 slnx 的虚拟文件夹。
+    /// </summary>
+    public static Task<(int ExitCode, string Output)> AddProjectToSolution(string solutionPath, string projectPath, string folder)
     {
-        string solution = Path.GetFullPath(solutionPath);
+        string solution = RequireSlnx(solutionPath);
         string project = Path.GetFullPath(projectPath);
-        return RunDotnetAsync("sln", solution, "add", project);
+        if (!File.Exists(project))
+        {
+            throw new FileNotFoundException($"要加入的项目不存在：{project}（创建项目不属于本工具，请自己跑命令行）。");
+        }
+
+        List<string> arguments = ["sln", solution, "add", project];
+        if (!string.IsNullOrWhiteSpace(folder))
+        {
+            // slnx 里的虚拟文件夹路径用正斜杠（dotnet CLI 自己会补出 /src/ 这样的层级）
+            arguments.Add("--solution-folder");
+            arguments.Add(folder.Trim().Replace('\\', '/').Trim('/'));
+        }
+
+        return RunDotnetAsync([.. arguments]);
     }
 
+    /// <summary>从解决方案移除项目（<c>dotnet sln &lt;slnx&gt; remove &lt;csproj&gt;</c>）；只支持 slnx。</summary>
     public static Task<(int ExitCode, string Output)> RemoveProjectFromSolution(string solutionPath, string projectPath)
     {
-        string solution = Path.GetFullPath(solutionPath);
+        string solution = RequireSlnx(solutionPath);
         string project = Path.GetFullPath(projectPath);
         return RunDotnetAsync("sln", solution, "remove", project);
     }
 
-    public static Task<(int ExitCode, string Output)> CreateProject(string folder, string name, string template)
+    /// <summary>编辑解决方案只对 slnx 进行（要改 .sln 先迁移）。</summary>
+    internal static string RequireSlnx(string solutionPath)
     {
-        string target = Path.GetFullPath(folder);
-        Directory.CreateDirectory(target);
-        return RunDotnetAsync("new", template, "-n", name, "-o", target);
+        string solution = Path.GetFullPath(solutionPath);
+        if (!File.Exists(solution))
+        {
+            throw new FileNotFoundException($"解决方案不存在：{solution}");
+        }
+
+        if (!solution.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"编辑解决方案只能对 .slnx 进行：{Path.GetFileName(solution)}。请先用「迁移解决方案为 slnx」把它迁过来。");
+        }
+
+        return solution;
     }
 
     public static async Task<(int ExitCode, string Output)> RunDotnetAsync(params string[] arguments)
