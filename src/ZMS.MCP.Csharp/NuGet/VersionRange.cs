@@ -176,7 +176,16 @@ public sealed class ComparableVersion : IComparable<ComparableVersion>, IEquatab
         hash.Add(ReleaseLabels.Length);
         foreach (string label in ReleaseLabels)
         {
-            hash.Add(label);
+            // 与 CompareTo 保持一致：数字标签按数值参与比较（1.0.0-01 == 1.0.0-1），
+            // 所以散列也必须按数值算，否则"相等但哈希不同"、放进 HashSet/Dictionary 会失效。
+            if (int.TryParse(label, NumberStyles.Integer, CultureInfo.InvariantCulture, out int numeric))
+            {
+                hash.Add(numeric);
+            }
+            else
+            {
+                hash.Add(label);
+            }
         }
 
         return hash.ToHashCode();
