@@ -395,6 +395,9 @@ public static class SolutionExplorer
         {
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            // dotnet 的输出是 UTF-8；不设的话会按控制台代码页（本机常是 GBK）解码，中文全乱码
+            StandardOutputEncoding = System.Text.Encoding.UTF8,
+            StandardErrorEncoding = System.Text.Encoding.UTF8,
             UseShellExecute = false,
             CreateNoWindow = true,
         };
