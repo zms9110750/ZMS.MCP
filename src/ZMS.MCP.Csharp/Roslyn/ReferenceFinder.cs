@@ -68,8 +68,10 @@ public static class ReferenceFinder
     /// 给**成员**时（符号精确）说到「某个类型的某个成员里被引用多少次」。
     /// 成员级条目超过上限就缩略成按类型聚合。任何情况下都不给文件名与行号。
     /// </summary>
-    public static string Describe(Compilation compilation, ISymbol target, bool exact)
+    public static string Describe(Compilation compilation, ISymbol target)
     {
+        // 「精确」由符号自己决定：给类型就是不精确（只报类型级），给成员才算精确（报到成员级）。
+        bool exact = target is not INamedTypeSymbol;
         IReadOnlyList<SymbolReferenceCount> counts = Count(compilation, target);
         StringBuilder builder = new();
         builder.AppendLine("## 引用");
