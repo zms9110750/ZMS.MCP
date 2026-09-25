@@ -609,7 +609,12 @@ public static class DocSymbolQuery
             }
             else if (IsClose(current))
             {
-                depth--;
+                // 多余的右括号不能让 depth 变负：一旦变负，后面所有 ',' 都不再算顶层分隔，
+                // 整串参数会被错误地合并成一个。
+                if (depth > 0)
+                {
+                    depth--;
+                }
             }
             else if (current == ',' && depth == 0)
             {
@@ -661,7 +666,12 @@ public static class DocSymbolQuery
             }
             else if (IsClose(current))
             {
-                depth--;
+                // 多余的右括号不能让 depth 变负：一旦变负，后面所有 ',' 都不再算顶层分隔，
+                // 整串参数会被错误地合并成一个。
+                if (depth > 0)
+                {
+                    depth--;
+                }
             }
             else if (current == '.' && depth == 0)
             {

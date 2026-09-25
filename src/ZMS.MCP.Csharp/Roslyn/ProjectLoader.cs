@@ -285,6 +285,13 @@ public enum LoadMode
 /// </summary>
 public sealed class LoadedProject
 {
+    /// <summary>
+    /// 元数据引用缓存的上限。正常情况下引用集有限（框架目录 + NuGet 包），
+    /// 但 MCP 服务是长驻进程、会反复加载不同项目，所以给一个兜底上限：
+    /// 超了就把整张表清空重建，代价远小于内存无界增长。
+    /// </summary>
+    private const int ReferenceCacheLimit = 512;
+
     private static readonly ConcurrentDictionary<string, MetadataReference> ReferenceCache = new(StringComparer.OrdinalIgnoreCase);
 
     public ProjectFileInfo Info { get; }
@@ -546,6 +553,12 @@ public sealed class LoadedProject
         try
         {
             MetadataReference created = MetadataReference.CreateFromFile(path);
+            if (ReferenceCache.Count >= ReferenceCacheLimit)
+            {
+                // 兜底：清空重建。MCP 服务是长驻进程，反复加载不同项目时这张表会一直涨
+                ReferenceCache.Clear();
+            }
+
             ReferenceCache[path] = created;
             return created;
         }
