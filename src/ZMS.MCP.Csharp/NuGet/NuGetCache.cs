@@ -1,5 +1,10 @@
 using System.IO.Compression;
 using System.Xml.Linq;
+using NuGet.Common;
+using NuGet.Configuration;
+using NuGet.Protocol;
+using NuGet.Protocol.Core.Types;
+using NuGet.Versioning;
 using ZMS.MCP.Csharp.Project;
 using ZMS.MCP.Csharp.Roslyn;
 
@@ -57,28 +62,39 @@ public static class NuGetCache
             .ToList();
     }
 
-    /// <summary>本地缓存的版本列表（降序）。</summary>
+    /// <summary>
+    /// 本地缓存的版本列表（降序）。取数走 NuGet 官方协议资源 ——
+    /// LocalV3FindPackageByIdResource 直接认全局包文件夹这种 &lt;id&gt;/&lt;version&gt;/ 布局，纯离线，不联网。
+    /// </summary>
     public static IReadOnlyList<ComparableVersion> Versions(string packageName)
     {
-        string directory = PackageDirectory(packageName);
-        if (!Directory.Exists(directory))
+        List<ComparableVersion> versions = [];
+        try
+        {
+            using SourceCacheContext cache = new();
+            IEnumerable<NuGetVersion> found = LocalFinder
+                .GetAllVersionsAsync(packageName, cache, NullLogger.Instance, CancellationToken.None)
+                .GetAwaiter().GetResult();
+            foreach (NuGetVersion version in found)
+            {
+                if (ComparableVersion.TryParse(version.ToNormalizedString(), out ComparableVersion? parsed) && parsed != null)
+                {
+                    versions.Add(parsed);
+                }
+            }
+        }
+        catch (Exception exception) when (exception is IOException or InvalidOperationException)
         {
             return [];
-        }
-
-        List<ComparableVersion> versions = [];
-        foreach (string? version in Directory.GetDirectories(directory).Select(path => Path.GetFileName(path)))
-        {
-            if (version != null && ComparableVersion.TryParse(version, out ComparableVersion? parsed) && parsed != null)
-            {
-                versions.Add(parsed);
-            }
         }
 
         versions.Sort();
         versions.Reverse();
         return versions;
     }
+
+    private static readonly FindPackageByIdResource LocalFinder =
+        new LocalV3FindPackageByIdResource(new PackageSource(Root(), "local-cache"));
 
     /// <summary>包目录（小写包名）。</summary>
     public static string PackageDirectory(string packageName)
