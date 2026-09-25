@@ -658,12 +658,22 @@ public sealed class DraftLayerTests
         string project = Path.Combine(root, "Demo.csproj");
         File.WriteAllText(project, "<Project Sdk=\"Microsoft.NET.Sdk\" />");
 
-        // confirm_draft 只认追踪 cookie（不再要 csprojPath）
-        string report = DraftService.Confirm("no-such-cookie", "", apply: true);
-        Assert.Contains("track_project", report);
+        // confirm_draft 只认追踪 cookie（不再要 csprojPath）；cookie 无效就抛错（由 ToolGuard 转成 Error: 文本）
+        InvalidOperationException invalid = Assert.Throws<InvalidOperationException>(
+            () => DraftService.Confirm("no-such-cookie", "", apply: true));
+        Assert.Contains("track_project", invalid.Message);
 
-        DraftStore store = new(Path.Combine(root, "drafts.db"));
-        store.SaveTracking(project, "track-cookie", new Dictionary<string, string>());
-        Assert.Contains("没有未完成的拟定", DraftService.Confirm("track-cookie", "", apply: true));
+        // 有追踪但没有任何拟定：同样拒绝（服务层与默认库打交道，所以这里也用默认库，收尾清掉）
+        DraftStore store = new();
+        try
+        {
+            store.SaveTracking(project, "track-cookie", new Dictionary<string, string>());
+            string report = DraftService.Confirm("track-cookie", "", apply: true);
+            Assert.Contains("拟定", report);
+        }
+        finally
+        {
+            store.ClearTracking(project);
+        }
     }
 }
