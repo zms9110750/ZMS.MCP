@@ -1,67 +1,64 @@
-using System.IO.Compression;
-using System.Net.Http.Json;
-using System.Text.Json;
+using NuGet.Common;
+using NuGet.Packaging;
+using NuGet.Protocol;
+using NuGet.Protocol.Core.Types;
+using NuGet.Versioning;
 
 namespace ZMS.MCP.Csharp.NuGet;
 
 /// <summary>
-/// nuget.org 的在线查询：模糊搜索、版本列表、nuspec、readme（从 nupkg 里取）。
-/// 所有调用都可能因为网络失败，调用方要准备好降级到"只有本地"的结果。
+/// nuget.org 的在线查询：模糊搜索、版本列表、nuspec、readme。
+/// **一律走 NuGet 官方协议栈**（NuGet.Protocol）：搜索与版本列表走协议资源；
+/// nuspec / readme 则把 .nupkg 下到**内存流**（绝不写盘），再用 PackageArchiveReader 从 zip 里取
+/// —— 线上只有 zip，不像本地缓存那样已经解压好。
+/// 所有调用都可能因为网络失败，调用方要准备好降级到「只有本地」的结果。
 /// </summary>
 public static class NuGetOnline
 {
-    /// <summary>nuget.org 搜索 API 的每页条数（与现有语义一致）。</summary>
+    /// <summary>搜索每页条数（与现有语义一致）。</summary>
     public const int PageSize = 15;
 
-    private const string SearchEndpoint = "https://azuresearch-usnc.nuget.org/query";
-    private const string FlatContainerEndpoint = "https://api.nuget.org/v3-flatcontainer";
+    private const string ServiceIndex = "https://api.nuget.org/v3/index.json";
 
-    private static readonly HttpClient Client = CreateClient();
+    private static readonly SourceRepository Source = Repository.Factory.GetCoreV3(ServiceIndex);
 
-    /// <summary>模糊搜索包名，返回 (包名, 最新版本) 列表。</summary>
+    /// <summary>模糊搜索包名，返回 (包名, 版本) 列表。</summary>
     public static IReadOnlyList<(string Id, string Version)> SearchPackages(string keyword, int page)
     {
-        int skip = Math.Max(page, 0) * PageSize;
-        string url = $"{SearchEndpoint}?q={Uri.EscapeDataString(keyword)}&skip={skip}&take={PageSize}&prerelease=false";
-        using JsonDocument document = GetJson(url);
-        if (document.RootElement.ValueKind != JsonValueKind.Object
-            || !document.RootElement.TryGetProperty("data", out JsonElement data)
-            || data.ValueKind != JsonValueKind.Array)
-        {
-            return [];
-        }
+        PackageSearchResource resource = GetResource<PackageSearchResource>();
+        SearchFilter filter = new(includePrerelease: false);
+        IEnumerable<IPackageSearchMetadata> found = resource.SearchAsync(
+            keyword,
+            filter,
+            Math.Max(page, 0) * PageSize,
+            PageSize,
+            NullLogger.Instance,
+            CancellationToken.None).GetAwaiter().GetResult();
 
         List<(string, string)> results = [];
-        foreach (JsonElement item in data.EnumerateArray())
+        foreach (IPackageSearchMetadata item in found)
         {
-            string? id = item.TryGetProperty("id", out JsonElement idElement) ? idElement.GetString() : null;
-            string? version = item.TryGetProperty("version", out JsonElement versionElement) ? versionElement.GetString() : null;
-            if (!string.IsNullOrWhiteSpace(id))
-            {
-                results.Add((id, version ?? ""));
-            }
+            results.Add((item.Identity.Id, item.Identity.Version.ToNormalizedString()));
         }
 
         return results;
     }
 
-    /// <summary>某个包在 nuget.org 上的全部版本（升序，和 flat container 一致）。</summary>
+    /// <summary>某个包在 nuget.org 上的全部版本（升序，由协议资源给出）。</summary>
     public static IReadOnlyList<ComparableVersion> Versions(string packageName)
     {
-        string url = $"{FlatContainerEndpoint}/{Uri.EscapeDataString(packageName.ToLowerInvariant())}/index.json";
-        using JsonDocument document = GetJson(url);
-        if (document.RootElement.ValueKind != JsonValueKind.Object
-            || !document.RootElement.TryGetProperty("versions", out JsonElement versions)
-            || versions.ValueKind != JsonValueKind.Array)
-        {
-            return [];
-        }
+        FindPackageByIdResource resource = GetResource<FindPackageByIdResource>();
+        using SourceCacheContext cache = new();
+        IEnumerable<NuGetVersion> versions = resource.GetAllVersionsAsync(
+            packageName,
+            cache,
+            NullLogger.Instance,
+            CancellationToken.None).GetAwaiter().GetResult();
 
         List<ComparableVersion> results = [];
-        foreach (JsonElement item in versions.EnumerateArray())
+        foreach (NuGetVersion version in versions)
         {
-            string? text = item.GetString();
-            if (!string.IsNullOrWhiteSpace(text) && ComparableVersion.TryParse(text, out ComparableVersion? parsed) && parsed != null)
+            if (ComparableVersion.TryParse(version.ToNormalizedString(), out ComparableVersion? parsed) && parsed != null)
             {
                 results.Add(parsed);
             }
@@ -70,85 +67,88 @@ public static class NuGetOnline
         return results;
     }
 
-    /// <summary>取线上 nuspec 原文；拿不到返回 null。</summary>
+    /// <summary>取线上包里的 nuspec 原文（下到内存再读）；拿不到返回 null。</summary>
     public static string? FetchNuspec(string packageName, string version)
     {
-        string lowered = packageName.ToLowerInvariant();
-        string url = $"{FlatContainerEndpoint}/{Uri.EscapeDataString(lowered)}/{Uri.EscapeDataString(version)}/{Uri.EscapeDataString(lowered)}.nuspec";
-        return GetStringOrNull(url);
+        return ReadFromPackage(packageName, version, ReadNuspec);
     }
 
-    /// <summary>取线上包里的 readme（下载 nupkg 再解出来）；拿不到返回 null。</summary>
+    /// <summary>取线上包里的 readme（下到内存再读 zip）；拿不到返回 null。</summary>
     public static string? FetchReadme(string packageName, string version, string? readmeName)
     {
-        string lowered = packageName.ToLowerInvariant();
-        string url = $"{FlatContainerEndpoint}/{Uri.EscapeDataString(lowered)}/{Uri.EscapeDataString(version)}/"
-            + $"{Uri.EscapeDataString(lowered)}.{Uri.EscapeDataString(version)}.nupkg";
+        // readmeName 只是兜底：nuspec 里声明了 readme 时，GetReadme() 会直接按声明取。
+        return ReadFromPackage(packageName, version, reader => ReadReadme(reader, readmeName));
+    }
 
-        byte[]? bytes = GetBytesOrNull(url);
-        if (bytes == null)
+    private static string ReadNuspec(PackageArchiveReader reader)
+    {
+        using Stream nuspec = reader.GetNuspec();
+        using StreamReader text = new(nuspec);
+        return text.ReadToEnd();
+    }
+
+    private static string? ReadReadme(PackageArchiveReader reader, string? readmeName)
+    {
+        // nuspec 里声明的 readme（<readme>docs\README.md</readme>）优先，其次用调用方给的兜底名。
+        string declared = reader.NuspecReader.GetMetadataValue("readme");
+        string wanted = !string.IsNullOrWhiteSpace(declared) ? declared : (readmeName ?? "");
+        if (string.IsNullOrWhiteSpace(wanted))
         {
-            return null;
+            wanted = "README.md";
         }
 
-        string wanted = string.IsNullOrWhiteSpace(readmeName) ? "README.md" : readmeName;
-        try
+        wanted = wanted.Replace('\\', '/').TrimStart('/');
+        string wantedFile = Path.GetFileName(wanted);
+        foreach (string name in reader.GetFiles())
         {
-            using MemoryStream buffer = new(bytes);
-            using ZipArchive archive = new(buffer);
-            ZipArchiveEntry? entry = archive.Entries.FirstOrDefault(
-                candidate => candidate.FullName.Replace('\\', '/').Equals(wanted.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase))
-                ?? archive.Entries.FirstOrDefault(
-                    candidate => Path.GetFileName(candidate.FullName).Equals("README.md", StringComparison.OrdinalIgnoreCase));
-            if (entry == null)
+            string candidate = name.Replace('\\', '/');
+            if (!candidate.Equals(wanted, StringComparison.OrdinalIgnoreCase)
+                && !Path.GetFileName(candidate).Equals(wantedFile, StringComparison.OrdinalIgnoreCase))
             {
-                return null;
+                continue;
             }
 
-            using Stream stream = entry.Open();
-            using StreamReader reader = new(stream);
-            return reader.ReadToEnd();
+            using Stream stream = reader.GetStream(name);
+            using StreamReader text = new(stream);
+            return text.ReadToEnd();
         }
-        catch (InvalidDataException)
-        {
-            return null;
-        }
+
+        return null;
     }
 
-    private static JsonDocument GetJson(string url)
+    /// <summary>
+    /// 把 .nupkg 下到**内存流**（不写盘），再交给 <paramref name="read"/> 从 zip 里取内容。
+    /// </summary>
+    private static string? ReadFromPackage(string packageName, string version, Func<PackageArchiveReader, string?> read)
     {
-        using HttpResponseMessage response = Client.GetAsync(url).GetAwaiter().GetResult();
-        response.EnsureSuccessStatusCode();
-        using Stream stream = response.Content.ReadAsStream();
-        return JsonDocument.Parse(stream);
-    }
-
-    private static string? GetStringOrNull(string url)
-    {
-        using HttpResponseMessage response = Client.GetAsync(url).GetAwaiter().GetResult();
-        if (!response.IsSuccessStatusCode)
+        if (!NuGetVersion.TryParse(version, out NuGetVersion? parsed) || parsed == null)
         {
             return null;
         }
 
-        return response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-    }
-
-    private static byte[]? GetBytesOrNull(string url)
-    {
-        using HttpResponseMessage response = Client.GetAsync(url).GetAwaiter().GetResult();
-        if (!response.IsSuccessStatusCode)
+        FindPackageByIdResource resource = GetResource<FindPackageByIdResource>();
+        using SourceCacheContext cache = new();
+        using MemoryStream package = new();
+        bool copied = resource.CopyNupkgToStreamAsync(
+            packageName,
+            parsed,
+            package,
+            cache,
+            NullLogger.Instance,
+            CancellationToken.None).GetAwaiter().GetResult();
+        if (!copied)
         {
             return null;
         }
 
-        return response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult();
+        package.Position = 0;
+        using PackageArchiveReader reader = new(package);
+        return read(reader);
     }
 
-    private static HttpClient CreateClient()
+    private static T GetResource<T>()
+        where T : class, INuGetResource
     {
-        HttpClient client = new() { Timeout = TimeSpan.FromSeconds(60) };
-        client.DefaultRequestHeaders.UserAgent.ParseAdd("ZMS.MCP.Csharp/1.0");
-        return client;
+        return Source.GetResourceAsync<T>().GetAwaiter().GetResult();
     }
 }
