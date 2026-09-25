@@ -192,16 +192,29 @@ public static class FileWriter
         }
     }
 
-    /// <summary>清掉这个文件可能残留的临时文件（反复失败或崩溃留下的）。</summary>
+    /// <summary>多久以前的临时文件才算"崩溃残留下来的"。</summary>
+    private static readonly TimeSpan StaleTemporaryAge = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// 清掉这个文件**很久以前**残留的临时文件（崩溃留下的）。
+    /// 只删超过 <see cref="StaleTemporaryAge"/> 的：同一个文件的临时文件名是
+    /// <c>&lt;文件&gt;.zms-tmp-&lt;GUID&gt;</c>，此刻可能正有另一次写入在用，
+    /// 通配全删会把对方正在用的临时文件删掉（对方的写入随之失败甚至丢数据）。
+    /// </summary>
     private static void CleanUpTemporaries(string filePath)
     {
         string directory = Path.GetDirectoryName(Path.GetFullPath(filePath)) ?? ".";
         string pattern = Path.GetFileName(filePath) + ".zms-tmp-*";
+        DateTime cutoff = DateTime.UtcNow - StaleTemporaryAge;
         try
         {
             foreach (string stale in Directory.GetFiles(directory, pattern))
             {
-                TryDelete(stale);
+                // 新近创建的属于"正在写"的那次调用（WriteOnce 自己会清理），这里只清陈旧的。
+                if (File.GetLastWriteTimeUtc(stale) < cutoff)
+                {
+                    TryDelete(stale);
+                }
             }
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
