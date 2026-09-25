@@ -13,13 +13,6 @@ namespace ZMS.MCP.Csharp.Tools;
 [McpServerToolType]
 public static class WorkspaceTools
 {
-    /// <summary>查看 slnx 树（原来注册为 `view_solution_tree`；现在并入 `view` 工具，这里只保留实现）。</summary>
-    public static string ViewSolutionTree(
-        [Description("Path to the .slnx file (or to a folder containing it)")] string path)
-    {
-        return ToolGuard.Run(() => SolutionViewer.ViewTree(SolutionViewer.ResolveSolutionFile(path)));
-    }
-
     [McpServerTool(ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
         "View a project or a solution: pass a csproj (or a project name that is unique in the nearest solution) to get the csproj verbatim " +
@@ -45,13 +38,6 @@ public static class WorkspaceTools
 
             return ProjectViewer.View(trimmed);
         });
-    }
-
-    /// <summary>查看项目（原来注册为 `view_project`；现在并入 `view` 工具，这里只保留实现）。</summary>
-    public static string ViewProject(
-        [Description("csproj path, or a unique project name")] string csprojPath)
-    {
-        return ToolGuard.Run(() => ProjectViewer.View(csprojPath));
     }
 
     [McpServerTool(ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]
