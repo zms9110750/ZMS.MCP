@@ -63,26 +63,35 @@ public static class ProjectTools
         "Editing solutions is only supported for .slnx — a .sln is refused, migrate it first. " +
         "Folder puts the project into that virtual folder of the slnx (empty = solution root). " +
         "The project must already exist; creating projects is not a tool here, run the CLI yourself.")]
-    public static async Task<string> AddProjectToSolution(
+    public static Task<string> AddProjectToSolution(
         [Description("Path to the .slnx file")] string slnxPath,
         [Description("Path to the project file to add (must already exist)")] string csprojPath,
         [Description("Virtual folder inside the slnx, e.g. 'src/Core' (empty = root)")] string folder = "")
     {
-        (int exitCode, string output) = await SolutionExplorer.AddProjectToSolution(slnxPath, csprojPath, folder);
-        string target = string.IsNullOrWhiteSpace(folder)
-            ? Path.GetFullPath(slnxPath)
-            : $"{Path.GetFullPath(slnxPath)}（/{folder.Trim().Replace('\\', '/').Trim('/')}/）";
-        return FormatDotnetResult(exitCode, output, $"Added {Path.GetFullPath(csprojPath)} to {target}");
+        // 整段（含路径解析与等待）都放进 ToolGuard：否则参数/路径异常会以裸异常冒泡，
+        // 错误格式与其余工具不一致。
+        return ToolGuard.RunAsync(async () =>
+        {
+            (int exitCode, string output) = await SolutionExplorer.AddProjectToSolution(slnxPath, csprojPath, folder);
+            string target = string.IsNullOrWhiteSpace(folder)
+                ? Path.GetFullPath(slnxPath)
+                : $"{Path.GetFullPath(slnxPath)}（/{folder.Trim().Replace('\\', '/').Trim('/')}/）";
+            return FormatDotnetResult(exitCode, output, $"Added {Path.GetFullPath(csprojPath)} to {target}");
+        });
     }
 
     [McpServerTool(ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false)]
     [Description("Remove a project from a .slnx via 'dotnet sln remove'. Editing solutions is only supported for .slnx.")]
-    public static async Task<string> RemoveProjectFromSolution(
+    public static Task<string> RemoveProjectFromSolution(
         [Description("Path to the .slnx file")] string slnxPath,
         [Description("Path to the project file to remove")] string csprojPath)
     {
-        (int exitCode, string output) = await SolutionExplorer.RemoveProjectFromSolution(slnxPath, csprojPath);
-        return FormatDotnetResult(exitCode, output, $"Removed {Path.GetFullPath(csprojPath)} from {Path.GetFullPath(slnxPath)}");
+        // 同 AddProjectToSolution：整段进 ToolGuard，错误格式才与其余工具一致。
+        return ToolGuard.RunAsync(async () =>
+        {
+            (int exitCode, string output) = await SolutionExplorer.RemoveProjectFromSolution(slnxPath, csprojPath);
+            return FormatDotnetResult(exitCode, output, $"Removed {Path.GetFullPath(csprojPath)} from {Path.GetFullPath(slnxPath)}");
+        });
     }
 
     private static string FormatDotnetResult(int exitCode, string output, string successMessage)

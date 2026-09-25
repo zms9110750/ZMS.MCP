@@ -16,6 +16,18 @@ public static class ToolGuard
             return "Error: " + Describe(exception);
         }
     }
+    /// <summary>异步版：把异常同样转成工具可读的文本结果（供 async 工具用）。</summary>
+    public static async Task<string> RunAsync(Func<Task<string>> action)
+    {
+        try
+        {
+            return await action();
+        }
+        catch (Exception exception)
+        {
+            return "Error: " + Describe(exception);
+        }
+    }
 
     /// <summary>
     /// 已知的环境类异常给一句可操作的提示；其余原样返回消息。
