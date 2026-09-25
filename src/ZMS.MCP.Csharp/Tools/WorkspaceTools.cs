@@ -22,25 +22,16 @@ public static class WorkspaceTools
 
     [McpServerTool(ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
-        "View something by path - one tool, three kinds of target, chosen by what the path points at. " +
-        "Folder: scans it and reports every solution with its described projects, plus the projects no solution covers (depth / kinds apply). " +
-        "csproj (a full path, or a project name that is unique in the nearest solution): prints the csproj verbatim, then every file that takes part in declaring it and can be found upwards. " +
-        "slnx: prints the solution as a tree, virtual folders included. " +
-        "A .sln is refused the same way it used to be, with a hint to migrate it first.")]
-    public static string View(
-        [Description("Folder to scan, or a csproj (full path or unique project name), or a .slnx file")] string path,
-        [Description("Max recursion depth when path is a folder (default 4)")] int depth = 4,
-        [Description("Kinds to include when path is a folder, comma separated: sln,slnx,csproj. Empty = all three")] string kinds = "")
+        "View a project or a solution: pass a csproj (or a project name that is unique in the nearest solution) to get the csproj verbatim " +
+        "followed by every file that takes part in declaring it and can be found upwards, or pass a .slnx to get the solution as a tree " +
+        "with its virtual folders. A .sln is refused with a hint to migrate it first; anything else is treated as a project name.")]
+    public static string ViewProjectOrSolution(
+        [Description("csproj path (or a unique project name), or a .slnx file")] string path)
     {
         return ToolGuard.Run(() =>
         {
             string trimmed = (path ?? "").Trim();
             string full = Path.GetFullPath(trimmed);
-            if (Directory.Exists(full))
-            {
-                return ProjectTools.ScanProjects(full, depth, kinds);
-            }
-
             if (File.Exists(full) && full.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase))
             {
                 return SolutionViewer.ViewTree(full);

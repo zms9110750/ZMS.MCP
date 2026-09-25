@@ -133,7 +133,7 @@ public sealed class SolutionExplorerTests
     {
         string root = CreateSolutionWithExtra(out _);
 
-        string output = ProjectTools.ScanProjects(root, 4, "");
+        string output = ProjectTools.ScanProjects(root, 4);
 
         Assert.Contains("App.slnx(2+1)", output);
         // 有额外关系时，描述项目全部用 ├─，额外关系用 - 开头
@@ -154,7 +154,7 @@ public sealed class SolutionExplorerTests
             """);
         WriteFile(Path.Combine(root, "src", "Cli", "Cli.csproj"), EmptyProject);
 
-        string output = ProjectTools.ScanProjects(root, 4, "");
+        string output = ProjectTools.ScanProjects(root, 4);
 
         Assert.Contains("App.slnx(1+0)", output);
         Assert.Contains("└─src/Cli/Cli.csproj", output);
