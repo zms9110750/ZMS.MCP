@@ -50,13 +50,13 @@
 输出：每个解决方案一块 `<解决方案路径>(被描述数+额外数)`，接着是它描述的项目树（`├─` / `└─`），再接着是"在该解决方案文件夹下、但没被它描述"的项目（`-` 前缀）；不被任何解决方案覆盖的项目在最后平铺。`bin` / `obj` / `.git` 跳过。一个都没扫到时报 `No solution/project files under <路径> (depth N).`。
 
 ````
-X:\temp\zms-mcp-demo\Demo.slnx(0+1)
+C:\temp\zms-mcp-demo\Demo.slnx(0+1)
 -Demo/Demo.csproj
 ````
 > 实测：这个 slnx 里没挂项目（项目被移除了），但同目录下发现了 1 个没被它描述的项目，所以是 `(0+1)` 加一行 `-` 前缀。
 
 ````
-No solution/project files under X:\temp\empty (depth 4).
+No solution/project files under C:\temp\empty (depth 4).
 ````
 > 一个都没扫到（`kinds` 把命中全过滤掉时也是这个形态，看起来一样）。
 
@@ -65,10 +65,10 @@ No solution/project files under X:\temp\empty (depth 4).
 打 csproj 原文，然后按文档顺序附上所有"参与声明这个项目"的文件：项目文件本身、最近的 `Directory.Build.props`（以及它自己 `Import` 的更上层文件）、`Directory.Packages.props`、`Directory.Build.targets`、`global.json`、`NuGet.config`，最后是还原生成物 `obj/<项目>.csproj.nuget.g.props|targets`。`obj` 的位置是问 MSBuild 要的，问不到时那一份列成"未列出"并说明原因（不猜 `<项目目录>/obj/`）。
 
 ````
-# X:\temp\zms-mcp-demo\Demo\Demo.csproj
+# C:\temp\zms-mcp-demo\Demo\Demo.csproj
 
 ## 项目文件
-X:\temp\zms-mcp-demo\Demo\Demo.csproj
+C:\temp\zms-mcp-demo\Demo\Demo.csproj
     <Project Sdk="Microsoft.NET.Sdk">
       ...
     </Project>
@@ -76,7 +76,7 @@ X:\temp\zms-mcp-demo\Demo\Demo.csproj
 > 实测：每份文件都是一段 `## <角色>` + 路径 + ```xml 原文；角色文字说明"这份为什么算参与声明"。
 
 ````
-Error: 项目文件不存在：X:\temp\zms-mcp-demo\Nope.csproj
+Error: 项目文件不存在：C:\temp\zms-mcp-demo\Nope.csproj
 ````
 > 给了 `.csproj` 结尾的路径但文件不在。
 
@@ -103,7 +103,7 @@ Error: 只能查看 .slnx：Demo.sln。请先用「迁移解决方案为 slnx」
 > `.sln` 会被明确拒绝（编辑与查看都只支持 `.slnx`）。
 
 ````
-Error: 解决方案 Demo.slnx 里没有名为 'X:\temp\nope' 的项目。
+Error: 解决方案 Demo.slnx 里没有名为 'C:\temp\nope' 的项目。
 ````
 > 实测：路径既不是文件夹、也不是 `.csproj` / `.sln` / `.slnx` 时，会被当成**项目名**去最近的解决方案里找 —— 所以这种"看起来像路径但不存在"的输入会得到这句（信息不够直白，但指明了它把它当项目名了）。想避免就走完整的 `.csproj` 路径。
 
@@ -125,8 +125,8 @@ Error: 解决方案 Demo.slnx 里没有名为 'X:\temp\nope' 的项目。
 
 ````
 # 迁移完成（命令行改盘，不进事务）
-- 源：X:\temp\demo\Demo.sln
-- 目标：X:\temp\demo\Demo.slnx
+- 源：C:\temp\demo\Demo.sln
+- 目标：C:\temp\demo\Demo.slnx
 
 已成功迁移解决方案文件。
 ````
@@ -134,7 +134,7 @@ Error: 解决方案 Demo.slnx 里没有名为 'X:\temp\nope' 的项目。
 
 ````
 Error: Demo.slnx 已经是 slnx 了。
-Error: 目标已存在：X:\temp\demo\Demo.slnx。确认要覆盖请带 force=true（dotnet sln migrate 需要 --force）。
+Error: 目标已存在：C:\temp\demo\Demo.slnx。确认要覆盖请带 force=true（dotnet sln migrate 需要 --force）。
 ````
 
 ### 添加项目到解决方案 `add_project_to_solution`
@@ -154,7 +154,7 @@ Error: 目标已存在：X:\temp\demo\Demo.slnx。确认要覆盖请带 force=tr
 - 注意：**错误形态与其它工具不同** —— 参数/环境问题不走统一包装，是协议级错误；成功且带 `folder` 时目标会额外标成 `（/src/Core/）`。
 
 ````
-✅ Added X:\temp\demo\Demo\Demo.csproj to X:\temp\demo\Demo.slnx（/src/Core/）
+✅ Added C:\temp\demo\Demo\Demo.csproj to C:\temp\demo\Demo.slnx（/src/Core/）
 
 ````
 已将项目“Demo\Demo.csproj”添加到解决方案中。
@@ -179,7 +179,7 @@ An error occurred invoking 'add_project_to_solution'.
 - 注意：错误形态同 `add_project_to_solution`（协议级错误）。
 
 ````
-✅ Removed X:\temp\demo\Demo\Demo.csproj from X:\temp\demo\Demo.slnx
+✅ Removed C:\temp\demo\Demo\Demo.csproj from C:\temp\demo\Demo.slnx
 
 ````
 已从解决方案中移除项目“Demo\Demo.csproj”。
@@ -204,7 +204,7 @@ An error occurred invoking 'add_project_to_solution'.
 
 ````
 # 编辑元数据
-- 项目：X:\temp\demo\Demo\Demo.csproj
+- 项目：C:\temp\demo\Demo\Demo.csproj
 - 编码：utf-8（来自 无 BOM 且是合法 UTF-8）
 - 已写入（XML 语法检查 + 根元素 Project 检查通过）。
 ````
@@ -231,9 +231,9 @@ Error: 最低 csproj 语法检查不通过：根元素必须是 <Project>，实�
 
 ````
 # 包引用
-- 项目：X:\temp\zms-mcp-demo\Demo\Demo.csproj
+- 项目：C:\temp\zms-mcp-demo\Demo\Demo.csproj
 - 依赖图来源：真实还原结果
-- assets：X:\temp\zms-mcp-demo\Demo\obj\project.assets.json
+- assets：C:\temp\zms-mcp-demo\Demo\obj\project.assets.json
 
 ## 顶级包（直接引用）
 - Microsoft.CodeAnalysis.CSharp 5.9.0
@@ -607,7 +607,7 @@ Error: 本地缓存里没有 Newtonsoft.Json 13.0.3 的 XML 文档注释（packa
 #### 情况一：`path` 空 → 列整个项目
 
 ````
-# X:\temp\zms-mcp-demo\Demo\Demo.csproj
+# C:\temp\zms-mcp-demo\Demo\Demo.csproj
 - TFM: `net11.0` | 符号: 3 | 过滤: type='' modifier='' args='' nameFilter=''
 
 ## Demo
@@ -626,7 +626,7 @@ _(无匹配符号)_
 > `type` 写错字母会**明确警告**（不静默吞掉）。
 
 ````
-# X:\temp\zms-mcp-demo\Demo\Demo.csproj
+# C:\temp\zms-mcp-demo\Demo\Demo.csproj
 - TFM: `net11.0` | 符号: 1 | 过滤: type='' modifier='' args='' nameFilter='Add'
 
 ## Demo
@@ -651,7 +651,7 @@ _(无匹配符号)_
 
 - Kind: `Method`
 - Declaring type: `Demo.Class1`
-- File: `X:\temp\zms-mcp-demo\Demo\Class1.cs`
+- File: `C:\temp\zms-mcp-demo\Demo\Class1.cs`
 - Lines: 5-5
 
         public static int Add(int a, int b) { return a + b + 5; }
@@ -665,7 +665,7 @@ _(无匹配符号)_
 
 - Kind: `Class`
 - Members: 1
-- File: `X:\temp\zms-mcp-demo\Demo\Class1.cs`（3-6）
+- File: `C:\temp\zms-mcp-demo\Demo\Class1.cs`（3-6）
 
 ````
 ### Members
@@ -697,7 +697,7 @@ _(无匹配符号)_
 
 ````
 # 追踪已开始
-- 项目：X:\temp\zms-mcp-demo\Demo\Demo.csproj
+- 项目：C:\temp\zms-mcp-demo\Demo\Demo.csproj
 - 追踪 cookie：`fa8f9165-…`
   - 用途一：传给 stage_draft / confirm_draft 做拟定编写与落盘（这两个工具只认 cookie，不要 csprojPath）
   - 用途二：传回 track_project 的 cookie 参数，即可解除追踪（清掉追踪记录与全部拟定）
@@ -715,7 +715,7 @@ _(无匹配符号)_
 
 ````
 # 取消追踪
-- 项目：X:\temp\zms-mcp-demo\Demo\Demo.csproj
+- 项目：C:\temp\zms-mcp-demo\Demo\Demo.csproj
 - 已删除拟定：1 条
 - 追踪快照已删除；要再写这个项目，请重新 track_project。
 ````
@@ -745,7 +745,7 @@ Error: 追踪 cookie 不匹配（或该项目没有在追踪）。
 
 ````
 # 拟定已更新
-- 项目：X:\temp\zms-mcp-demo\Demo\Demo.csproj
+- 项目：C:\temp\zms-mcp-demo\Demo\Demo.csproj
 - 符号：Demo.Class1.Add(int, int)
 - 本次：写入（replaced）
 - 拟定条数：1
@@ -773,7 +773,7 @@ An error occurred invoking 'stage_draft'.
 
 ````
 # 拟定
-- 项目：X:\temp\zms-mcp-demo\Demo\Demo.csproj
+- 项目：C:\temp\zms-mcp-demo\Demo\Demo.csproj
 - 起始时间：2026-09-25T08:28:54.…+00:00
 - 条数：1
 
@@ -843,7 +843,7 @@ Error: 无法识别选择：'snapshot'。可用：keep / drop
 
 ````
 # 拟定确认
-- 项目：X:\temp\zms-mcp-demo\Demo\Demo.csproj
+- 项目：C:\temp\zms-mcp-demo\Demo\Demo.csproj
 
 ## 变更分类
 ````
@@ -851,7 +851,7 @@ Error: 无法识别选择：'snapshot'。可用：keep / drop
 - Demo.Class1.Add(int,int)
 
 ## 本次改动涉及
-- X:\temp\zms-mcp-demo\Demo\Class1.cs（Demo.Class1.Add(int, int)）
+- C:\temp\zms-mcp-demo\Demo\Class1.cs（Demo.Class1.Add(int, int)）
 
 ## 诊断对比（按 错误码 + 消息 + 文件 配对，行号只用于展示）
 - 新增：无
@@ -880,7 +880,7 @@ Error: 无法识别选择：'snapshot'。可用：keep / drop
 
 ````
 ## 已落盘
-- X:\temp\zms-mcp-demo\Demo\Class1.cs
+- C:\temp\zms-mcp-demo\Demo\Class1.cs
 - 编码：按各文件原编码写回（新建文件 UTF-8 无 BOM）
 - 格式化：已对本次改动的文件跑 dotnet format
 - format 额外改动：无
@@ -890,12 +890,12 @@ Error: 无法识别选择：'snapshot'。可用：keep / drop
 
 ````
 Error: 落盘目标状态与发许可时不一致，已作废许可：
-  - X:\temp\…\Class1.cs 在发许可之后被外部改过
+  - C:\temp\…\Class1.cs 在发许可之后被外部改过
 ````
 
 ````
 # 落盘未完成（文件已写入，但格式化失败）
-- 已写入 1 个文件：X:\temp\…\Class1.cs
+- 已写入 1 个文件：C:\temp\…\Class1.cs
 - dotnet format 未成功（退出码 1）：…
 - 拟定与写前日志**已保留**：处理完之后重新 confirm_draft（不带 cookie）预检即可重试。
 ````

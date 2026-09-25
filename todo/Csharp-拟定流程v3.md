@@ -216,4 +216,4 @@ S* ─untrack(追踪 cookie)─▶ S0
 | 5 | 选择器：`select_draft`（四种 choice） |
 | 6 | 预检与落盘：`confirm_draft` 两段式 + 判定顺序 + 五项预检 + 同文件合成 + 落盘事务（journal → 写 → format → 清 → 重算基线） |
 | 7 | 启动：前滚三分支 → 刷新基线 → 孤儿清理 |
-| 8 | 收尾：`FileWriter` 去重试与"内容未变不写"；同步 `docs/Csharp-边缘情况.md` 与 README；全量测试；在 `X:\temp\zms-mcp-demo` 上把四步动作返回原文贴出 |
+| 8 | 收尾：`FileWriter` 去重试与"内容未变不写"；同步 `docs/Csharp-边缘情况.md` 与 README；全量测试；在 `C:\temp\zms-mcp-demo` 上把四步动作返回原文贴出 |

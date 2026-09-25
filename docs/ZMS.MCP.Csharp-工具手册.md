@@ -30,7 +30,7 @@
 - 注意：`depth` 默认只有 4，仓库很深时给大值；`kinds` 给了值就把别的种类**整体过滤掉**，看起来会像"这里没有项目"。
 
 ```
-X:\src\ZMS.MCP\ZMS.MCP.slnx(3+1)
+C:\src\ZMS.MCP\ZMS.MCP.slnx(3+1)
 ├─src/ZMS.MCP.Csharp/ZMS.MCP.Csharp.csproj
 ├─src/ZMS.MCP.Cli/ZMS.MCP.Cli.csproj
 └─test/ZMS.MCP.Csharp.Test/ZMS.MCP.Csharp.Test.csproj
@@ -41,7 +41,7 @@ C:\tools\foo\bar.csproj
 > 有一个解决方案：`(3+1)` = 描述了 3 个项目、另外发现 1 个没被它描述（`-` 前缀）；末行是完全不受任何解决方案覆盖的散项目。
 
 ```
-No solution/project files under X:\temp\empty (depth 4).
+No solution/project files under C:\temp\empty (depth 4).
 ```
 > 一个都没扫到时只有这一行 —— `kinds` 把命中全过滤掉时也是这个形态，看起来一样。
 
@@ -58,10 +58,10 @@ No solution/project files under X:\temp\empty (depth 4).
 - 注意：`obj` 的位置是问 MSBuild 要的；问不到时那份列成"未列出"并说明原因，而不是猜一个 `<项目目录>/obj/`。
 
 ```
-# X:\temp\zms-mcp-demo\Demo\Demo.csproj
+# C:\temp\zms-mcp-demo\Demo\Demo.csproj
 
 ## 项目文件
-X:\temp\zms-mcp-demo\Demo\Demo.csproj
+C:\temp\zms-mcp-demo\Demo\Demo.csproj
     <Project Sdk="Microsoft.NET.Sdk">
 
       <PropertyGroup>
@@ -71,7 +71,7 @@ X:\temp\zms-mcp-demo\Demo\Demo.csproj
     </Project>
 
 ## 目录级（MSBuild 自动导入，取最近一份） — Directory.Build.props
-X:\temp\zms-mcp-demo\Directory.Build.props
+C:\temp\zms-mcp-demo\Directory.Build.props
     <Project>
       <PropertyGroup>
         <LangVersion>latest</LangVersion>
@@ -79,13 +79,13 @@ X:\temp\zms-mcp-demo\Directory.Build.props
     </Project>
 
 ## 还原生成（属性） — obj 位置取自 MSBuild 的 MSBuildProjectExtensionsPath
-X:\temp\zms-mcp-demo\Demo\obj\Demo.csproj.nuget.g.props
+C:\temp\zms-mcp-demo\Demo\obj\Demo.csproj.nuget.g.props
     ...
 ```
 > 正常形态：每一份都是 `## <角色>` + 路径 + ```` ```xml ```` 原文；角色文字说明"这份文件为什么算参与声明"。
 
 ```
-Error: 项目文件不存在：X:\temp\zms-mcp-demo\Nope.csproj
+Error: 项目文件不存在：C:\temp\zms-mcp-demo\Nope.csproj
 ```
 > 给了 `.csproj` 结尾的路径但文件不在。
 
@@ -127,8 +127,8 @@ Demo.slnx
 > 空解决方案（或里面只有根节点）时只有文件名这一行。
 
 ```
-Error: 路径不存在：X:\temp\nope
-Error: 这个文件夹里没有解决方案文件：X:\temp\empty
+Error: 路径不存在：C:\temp\nope
+Error: 这个文件夹里没有解决方案文件：C:\temp\empty
 Error: 只能查看 .slnx：Demo.sln。请先用「迁移解决方案为 slnx」把它迁过来。
 ```
 > 三种拒绝：路径不存在 / 文件夹里没有解决方案 / 命中的是 `.sln`。
@@ -151,8 +151,8 @@ Error: 只能查看 .slnx：Demo.sln。请先用「迁移解决方案为 slnx」
 
 ```
 # 迁移完成（命令行改盘，不进事务）
-- 源：X:\temp\demo\Demo.sln
-- 目标：X:\temp\demo\Demo.slnx
+- 源：C:\temp\demo\Demo.sln
+- 目标：C:\temp\demo\Demo.slnx
 
 已成功迁移解决方案文件。
 ```
@@ -164,7 +164,7 @@ Error: Demo.slnx 已经是 slnx 了。
 > 幂等性**没有**做：目标已经是 slnx 就是错误，不是"已完成"。
 
 ```
-Error: 目标已存在：X:\temp\demo\Demo.slnx。确认要覆盖请带 force=true（dotnet sln migrate 需要 --force）。
+Error: 目标已存在：C:\temp\demo\Demo.slnx。确认要覆盖请带 force=true（dotnet sln migrate 需要 --force）。
 
 Error: dotnet sln migrate 失败（退出码 1）：
 <命令行的完整输出>
@@ -188,7 +188,7 @@ Error: dotnet sln migrate 失败（退出码 1）：
 - 注意：**错误形态与其它工具不同** —— 参数/环境问题不会变成 `Error:` 文本，而是协议级错误 `An error occurred invoking 'add_project_to_solution'`（这个工具没走统一的异常包装）；成功且带 `folder` 时目标会额外标成 `（/src/Core/）`。
 
 ```
-✅ Added X:\temp\demo\Demo\Demo.csproj to X:\temp\demo\Demo.slnx（/src/Core/）
+✅ Added C:\temp\demo\Demo\Demo.csproj to C:\temp\demo\Demo.slnx（/src/Core/）
 
     已将项目“Demo\Demo.csproj”添加到解决方案中。
 ```
@@ -221,7 +221,7 @@ An error occurred invoking 'add_project_to_solution'.
 - 注意：错误形态与 `add_project_to_solution` 一样是协议级错误。
 
 ```
-✅ Removed X:\temp\demo\Demo\Demo.csproj from X:\temp\demo\Demo.slnx
+✅ Removed C:\temp\demo\Demo\Demo.csproj from C:\temp\demo\Demo.slnx
 
     已从解决方案中移除项目“Demo\Demo.csproj”。
 
@@ -249,7 +249,7 @@ An error occurred invoking 'remove_project_from_solution'.
 
 ```
 # 编辑元数据
-- 项目：X:\temp\demo\Demo\Demo.csproj
+- 项目：C:\temp\demo\Demo\Demo.csproj
 - 编码：utf-8（来自 无 BOM 且是合法 UTF-8）
 - **预演，未写入**。
 
@@ -261,7 +261,7 @@ An error occurred invoking 'remove_project_from_solution'.
 
 ```
 # 编辑元数据
-- 项目：X:\temp\demo\Demo\Demo.csproj
+- 项目：C:\temp\demo\Demo\Demo.csproj
 - 编码：utf-8（来自 BOM）
 - 已写入（XML 语法检查 + 根元素 Project 检查通过）。
 ```
@@ -269,7 +269,7 @@ An error occurred invoking 'remove_project_from_solution'.
 
 ```
 # 编辑元数据
-- 项目：X:\temp\demo\Demo\Demo.csproj
+- 项目：C:\temp\demo\Demo\Demo.csproj
 - 编码：utf-8（来自 无 BOM 且是合法 UTF-8）
 - 内容没有变化，未写入。
 ```
@@ -297,9 +297,9 @@ Error: 最低 csproj 语法检查不通过：根元素必须是 <Project>，实�
 
 ```
 # 包引用
-- 项目：X:\temp\demo\Demo\Demo.csproj
+- 项目：C:\temp\demo\Demo\Demo.csproj
 - 依赖图来源：真实还原结果
-- assets：X:\temp\demo\Demo\obj\project.assets.json
+- assets：C:\temp\demo\Demo\obj\project.assets.json
 
 ## 顶级包（直接引用）
 - Newtonsoft.Json 13.0.3
@@ -314,7 +314,7 @@ Error: 最低 csproj 语法检查不通过：根元素必须是 <Project>，实�
 
 ```
 # 包引用
-- 项目：X:\temp\demo\Demo\Demo.csproj
+- 项目：C:\temp\demo\Demo\Demo.csproj
 - 依赖图来源：ReferencePath（还原产物缺失，可能不全）（MSBuild 没给出 ProjectAssetsFile）
 
 ## 顶级包（直接引用）
@@ -655,7 +655,7 @@ Error: 本地缓存里没有 Newtonsoft.Json 13.0.3 的 XML 文档注释（packa
 - 注意：表头会回显 TFM、源文件数、类型数；`filter` 匹配的是类型名本身（不含命名空间）。
 
 ```
-# X:\temp\zms-mcp-demo\Demo\Demo.csproj
+# C:\temp\zms-mcp-demo\Demo\Demo.csproj
 - TFM: `net11.0` | source files: 1 | types: 2
 
 - `Demo.Class1` (class) — Class1.cs:3
@@ -664,7 +664,7 @@ Error: 本地缓存里没有 Newtonsoft.Json 13.0.3 的 XML 文档注释（packa
 > 正常形态；分部类（`Demo.Partial`）把两处声明位置写在同一行。
 
 ```
-# X:\temp\zms-mcp-demo\Demo\Demo.csproj
+# C:\temp\zms-mcp-demo\Demo\Demo.csproj
 - TFM: `net11.0` | source files: 1 | types: 0
 
 ```
@@ -723,7 +723,7 @@ _(no members)_
   - `modifier` 是**与**关系（每个条件都要满足；访问性那几个互斥，同时给两个基本筛不出东西）。
 
 ```
-# X:\temp\zms-mcp-demo\Demo\Demo.csproj
+# C:\temp\zms-mcp-demo\Demo\Demo.csproj
 - TFM: `net11.0` | 符号: 3 | 过滤: type='' modifier='' args=''
 
 ## Demo
@@ -771,7 +771,7 @@ _(无匹配符号)_
 
 - Kind: `Method`
 - Declaring type: `Demo.Class1`
-- File: `X:\temp\zms-mcp-demo\Demo\Class1.cs`
+- File: `C:\temp\zms-mcp-demo\Demo\Class1.cs`
 - Lines: 5-5
 
         public static int Add(int a, int b) { return a + b; }
@@ -782,7 +782,7 @@ _(无匹配符号)_
 ## Demo.Class1
 
 - Kind: `NamedType`
-- File: `X:\temp\zms-mcp-demo\Demo\Class1.cs`
+- File: `C:\temp\zms-mcp-demo\Demo\Class1.cs`
 
     public class Class1
     {
@@ -842,7 +842,7 @@ public static int Add(int a, int b) { return a + b + 9; }
 
 ```
 ✅ added `new member in Demo.Class1`
-- File: `X:\temp\zms-mcp-demo\Demo\Class1.cs` (Class1.cs)
+- File: `C:\temp\zms-mcp-demo\Demo\Class1.cs` (Class1.cs)
 - Lines: 7-7
 
 Re-read with GetMember to verify the result.
@@ -874,7 +874,7 @@ Error: 找不到成员 'Nope'，无法插到它前面。
 
 ```
 ✅ replaced `Demo.Class1.Add(int, int)`
-- File: `X:\temp\zms-mcp-demo\Demo\Class1.cs` (Class1.cs)
+- File: `C:\temp\zms-mcp-demo\Demo\Class1.cs` (Class1.cs)
 - Lines: 5-8
 
 Re-read with GetMember to verify the result.
@@ -899,7 +899,7 @@ Re-read with GetMember to verify the result.
 
 ```
 ✅ removed `Demo.Class1.Welcome()`
-- File: `X:\temp\zms-mcp-demo\Demo\Class1.cs` (Class1.cs)
+- File: `C:\temp\zms-mcp-demo\Demo\Class1.cs` (Class1.cs)
 - Lines: 7-7
 
 Re-read with GetMember to verify the result.
@@ -928,7 +928,7 @@ Re-read with GetMember to verify the result.
 ```
 
 # 追踪已开始
-- 项目：X:\temp\zms-mcp-demo\Demo\Demo.csproj
+- 项目：C:\temp\zms-mcp-demo\Demo\Demo.csproj
 - 追踪 cookie：`a054a503-...`（要清除追踪与拟定，把它传回 track_project 的 cookie 参数）
 - 快照：2 个符号
 
@@ -942,7 +942,7 @@ Re-read with GetMember to verify the result.
 
 ```
 # 追踪已开始
-- 项目：X:\temp\zms-mcp-demo\Demo\Demo.csproj
+- 项目：C:\temp\zms-mcp-demo\Demo\Demo.csproj
 - 追踪 cookie：`a054a503-...`（要清除追踪与拟定，把它传回 track_project 的 cookie 参数）
 - 快照：2 个符号
 
@@ -956,7 +956,7 @@ Re-read with GetMember to verify the result.
 
 ```
 # 取消追踪
-- 项目：X:\temp\zms-mcp-demo\Demo\Demo.csproj
+- 项目：C:\temp\zms-mcp-demo\Demo\Demo.csproj
 - 已删除拟定：1 条
 - 追踪快照已删除；要再写这个项目，请重新 track_project。
 ```
@@ -992,7 +992,7 @@ Error: 追踪 cookie 不匹配（或该项目没有在追踪）。
 
 ```
 # 拟定已更新
-- 项目：X:\temp\zms-mcp-demo\Demo\Demo.csproj
+- 项目：C:\temp\zms-mcp-demo\Demo\Demo.csproj
 - 符号：Demo.Class1.Add(int, int)
 - 本次：写入（replaced）
 - 拟定条数：1
@@ -1002,7 +1002,7 @@ Error: 追踪 cookie 不匹配（或该项目没有在追踪）。
 
 ```
 # 拟定已更新
-- 项目：X:\temp\zms-mcp-demo\Demo\Demo.csproj
+- 项目：C:\temp\zms-mcp-demo\Demo\Demo.csproj
 - 符号：Demo.Class1.Welcome()
 - 本次：删除
 - 拟定条数：2
@@ -1012,7 +1012,7 @@ Error: 追踪 cookie 不匹配（或该项目没有在追踪）。
 
 ```
 # 拟定已更新
-- 项目：X:\temp\zms-mcp-demo\Demo\Demo.csproj
+- 项目：C:\temp\zms-mcp-demo\Demo\Demo.csproj
 - 符号：Demo.NewThing
 - 本次：新建类型
 - 拟定条数：1
@@ -1044,7 +1044,7 @@ Error: 这个项目还没有开始追踪，请先调用 track_project。
 
 ```
 # 拟定
-- 项目：X:\temp\zms-mcp-demo\Demo\Demo.csproj
+- 项目：C:\temp\zms-mcp-demo\Demo\Demo.csproj
 - 起始时间：2026-09-24T20:12:23.1174505+00:00
 - 条数：2
 
@@ -1055,7 +1055,7 @@ Error: 这个项目还没有开始追踪，请先调用 track_project。
 
 ```
 # 拟定
-- 项目：X:\temp\zms-mcp-demo\Demo\Demo.csproj
+- 项目：C:\temp\zms-mcp-demo\Demo\Demo.csproj
 - 起始时间：2026-09-24T20:12:23.1174505+00:00
 - 条数：0
 ```
@@ -1130,14 +1130,14 @@ Error: 无法识别选择：'keep'。可用：draft / snapshot / disk / drop
 
 ```
 # 拟定确认
-- 项目：X:\temp\zms-mcp-demo\Demo\Demo.csproj
+- 项目：C:\temp\zms-mcp-demo\Demo\Demo.csproj
 
 ## 变更分类
 ### 修改（1）
 - Demo.Class1.Add(int,int)
 
 ## 本次改动涉及
-- X:\temp\zms-mcp-demo\Demo\Class1.cs（Demo.Class1.Add(int, int)）
+- C:\temp\zms-mcp-demo\Demo\Class1.cs（Demo.Class1.Add(int, int)）
 
 ## 诊断对比（按 错误码 + 消息 + 文件 配对，行号只用于展示）
 - 新增：无
@@ -1157,7 +1157,7 @@ Error: 无法识别选择：'keep'。可用：draft / snapshot / disk / drop
 - 消失：无
 
 ## 预检查
-- ⚠ 会新建目录：X:\temp\zms-mcp-demo\Demo\New
+- ⚠ 会新建目录：C:\temp\zms-mcp-demo\Demo\New
 
 - 落盘 cookie：`...`
 ```
@@ -1165,7 +1165,7 @@ Error: 无法识别选择：'keep'。可用：draft / snapshot / disk / drop
 
 ```
 ## 预检查
-- ❌ Demo.Class1.Add(int, int)：文件 X:\temp\...\Class1.cs 在拟定期间被非工具改动过
+- ❌ Demo.Class1.Add(int, int)：文件 C:\temp\...\Class1.cs 在拟定期间被非工具改动过
 
 （没有发落盘 cookie：先把上面这些问题处理掉，再来一次预检。）
 ```
@@ -1173,7 +1173,7 @@ Error: 无法识别选择：'keep'。可用：draft / snapshot / disk / drop
 
 ```
 ## 已落盘
-- X:\temp\zms-mcp-demo\Demo\Class1.cs
+- C:\temp\zms-mcp-demo\Demo\Class1.cs
 - 编码：按各文件原编码写回（新建文件 UTF-8 无 BOM）
 - 格式化：已对本次改动的文件跑 dotnet format
 - format 额外改动：无
@@ -1184,14 +1184,14 @@ Error: 无法识别选择：'keep'。可用：draft / snapshot / disk / drop
 
 ```
 Error: 落盘目标状态与发许可时不一致，已作废许可：
-  - X:\temp\...\Class1.cs 在发许可之后被外部改过
-  - Demo.Class1.Add(int, int)：X:\temp\...\Class1.cs 在发许可之后被外部改过
+  - C:\temp\...\Class1.cs 在发许可之后被外部改过
+  - Demo.Class1.Add(int, int)：C:\temp\...\Class1.cs 在发许可之后被外部改过
 ```
 > 带 cookie 落盘但窗口期内文件被外部改了：作废许可并**拒绝写入**（文件与符号两个层级都报出来）。
 
 ```
 # 落盘未完成（文件已写入，但格式化失败）
-- 已写入 1 个文件：X:\temp\...\Class1.cs
+- 已写入 1 个文件：C:\temp\...\Class1.cs
 - dotnet format 未成功（退出码 1）：...
 - 拟定与写前日志**已保留**：处理完之后重新 confirm_draft（不带 cookie）预检即可重试。
 ```
