@@ -361,6 +361,9 @@ public static class SymbolQuery
         {
             TypeKind.Class => kinds.HasFlag(SymbolKinds.Class),
             TypeKind.Struct => kinds.HasFlag(SymbolKinds.Struct),
+            // 枚举跟着 S 走：S 在这个工具里表示"值类型"，enum 也是值类型。
+            // delegate 不参与类型过滤（用户明确：不要）。
+            TypeKind.Enum => kinds.HasFlag(SymbolKinds.Struct),
             TypeKind.Interface => kinds.HasFlag(SymbolKinds.Interface),
             _ => false,
         };
