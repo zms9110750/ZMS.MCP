@@ -69,6 +69,13 @@ public static class MsBuildEvaluator
 
     private static readonly ConcurrentDictionary<string, CacheEntry> Cache = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// 求值的可注入入口：**测试**用它替换掉真实的 <c>dotnet msbuild</c> 调用 ——
+    /// 那是别人的命令，一次冷启动几秒且与文件数无关，而端到端用例要验的是我们自己的语义。
+    /// 生产保持 null（真跑 MSBuild）。
+    /// </summary>
+    internal static Func<string, MsBuildEvaluation>? Override;
+
     private sealed record CacheEntry(
         MsBuildEvaluation Evaluation,
         IReadOnlyDictionary<string, DateTime> InputTimestamps,
@@ -88,6 +95,12 @@ public static class MsBuildEvaluator
         if (!File.Exists(fullPath))
         {
             throw new FileNotFoundException($"Project file not found: {fullPath}");
+        }
+
+        if (Override != null)
+        {
+            // 测试注入：不请 MSBuild 出场（别人的命令，冷启动几秒，且与我们要验的语义无关）
+            return Override(fullPath);
         }
 
         if (!refresh &&

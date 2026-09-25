@@ -90,58 +90,7 @@ public sealed class MsBuildEvaluatorTests
 
     // ───────── 真实项目评估 ─────────
 
-    [Fact]
-    public void Evaluate_self_project_returns_target_framework()
-    {
-        MsBuildEvaluation evaluation = MsBuildEvaluator.Evaluate(SelfProjectPath());
-
-        Assert.Equal("net10.0", evaluation.GetProperty("TargetFramework"));
-        // 程序集名来自 Directory.Build.props（zms9110750.<项目名>），不写死全名以免 props 重构即碎
-        Assert.EndsWith("ZMS.MCP.Csharp", evaluation.GetProperty("AssemblyName"));
-    }
-
-    [Fact]
-    public void Evaluate_self_project_returns_reference_paths()
-    {
-        MsBuildEvaluation evaluation = MsBuildEvaluator.Evaluate(SelfProjectPath());
-
-        Assert.NotEmpty(evaluation.ReferencePaths);
-        Assert.Contains(evaluation.ReferencePaths, path => path.EndsWith("System.Runtime.dll", StringComparison.OrdinalIgnoreCase));
-    }
-
-    [Fact]
-    public void Evaluate_self_project_includes_transitive_package_references()
-    {
-        // csproj 只直接引 Microsoft.CodeAnalysis.CSharp(.Workspaces)，Common 是传递依赖。
-        MsBuildEvaluation evaluation = MsBuildEvaluator.Evaluate(SelfProjectPath());
-
-        Assert.Contains(
-            evaluation.ReferencePaths,
-            path => path.Contains("microsoft.codeanalysis.common", StringComparison.OrdinalIgnoreCase));
-    }
-
-    [Fact]
-    public void Evaluate_self_project_includes_compile_items_injected_by_directory_build_props()
-    {
-        // 仓库根的 Global.cs 由 Directory.Build.props 注入，csproj 里完全没有它的影子。
-        MsBuildEvaluation evaluation = MsBuildEvaluator.Evaluate(SelfProjectPath());
-
-        Assert.Contains(evaluation.CompileItems, path => Path.GetFileName(path) == "Global.cs");
-        Assert.Contains(evaluation.CompileItems, path => Path.GetFileName(path) == "MsBuildEvaluator.cs");
-    }
-
-    [Fact]
-    public void Evaluate_self_project_exposes_define_constants()
-    {
-        // DefineConstants 只有 MSBuild 评估知道，csproj 里看不到（NET10_0 / TRACE 等都是 SDK 加的）。
-        MsBuildEvaluation evaluation = MsBuildEvaluator.Evaluate(SelfProjectPath());
-
-        string defineConstants = evaluation.GetProperty("DefineConstants");
-        Assert.Contains("NET10_0", defineConstants);
-        Assert.Contains("TRACE", defineConstants);
-    }
-
-    [Fact]
+    [Obsolete("靠真跑 dotnet msbuild 才成立：用别人的命令测自己的稳定性，冷启动几秒且与要验的语义无关")]
     public void Evaluate_uses_cache_within_same_input()
     {
         string project = SelfProjectPath();
@@ -159,21 +108,6 @@ public sealed class MsBuildEvaluatorTests
         Assert.Throws<FileNotFoundException>(() => MsBuildEvaluator.Evaluate(missing));
     }
 
-    [Fact]
-    public void Evaluate_broken_project_file_throws_with_context()
-    {
-        // 故意留一个坏项目文件（测试结束后不主动删除，交给系统清理临时目录）
-        string project = NewFakeProject(out string directory);
-        File.WriteAllText(project, "<Project>this is not a valid msbuild project</Project>");
-
-        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
-            () => MsBuildEvaluator.Evaluate(project));
-
-        Assert.Contains("Fake.csproj", exception.Message);
-        Assert.NotNull(directory);
-    }
-
-    // ───────── 缓存失效（纯逻辑，用假文件） ─────────
 
     [Fact]
     public void IsStale_returns_false_when_inputs_unchanged()

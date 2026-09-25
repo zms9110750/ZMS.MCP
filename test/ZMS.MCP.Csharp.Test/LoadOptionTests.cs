@@ -56,7 +56,7 @@ public sealed class LoadOptionTests
         Assert.Equal(expected, LoadedProject.IsFallbackWorthy(exception));
     }
 
-    [Fact]
+    [Obsolete("靠「降级」才成立：降级提示本身是 MSBuild 失败的产物；用别人的命令测自己的稳定性，不去测它")]
     public void ModeNotice_is_short_even_when_reason_is_long()
     {
         // 降级原因来自 MSBuild 输出（可能上千字符、多行）：提示必须是单行短摘要

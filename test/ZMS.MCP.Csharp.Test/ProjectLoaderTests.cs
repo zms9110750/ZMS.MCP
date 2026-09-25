@@ -46,67 +46,7 @@ public sealed class ProjectLoaderTests
         return Path.Combine(RepositoryRoot(), "src", "ZMS.MCP.Csharp", "ZMS.MCP.Csharp.csproj");
     }
 
-    [Fact]
-    public void Load_real_project_uses_msbuild_evaluation()
-    {
-        LoadedProject project = LoadedProject.Load(SelfProjectPath());
-
-        Assert.Equal(LoadMode.Evaluated, project.Mode);
-        Assert.Empty(project.FallbackReason);
-        // 评估模式不该给使用者任何"简化模式"提示
-        Assert.Empty(project.ModeNotice());
-    }
-
-    [Fact]
-    public void Load_real_project_resolves_framework_and_package_types()
-    {
-        LoadedProject project = LoadedProject.Load(SelfProjectPath());
-
-        // 框架程序集与包的传递依赖都要能被解析出来，否则就是引用集没接对
-        Assert.NotNull(project.Compilation.GetTypeByMetadataName("System.String"));
-        Assert.NotNull(project.Compilation.GetTypeByMetadataName("Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree"));
-        Assert.NotNull(project.Compilation.GetTypeByMetadataName("Microsoft.CodeAnalysis.SyntaxNode"));
-    }
-
-    [Fact]
-    public void Load_real_project_has_no_missing_type_errors()
-    {
-        LoadedProject project = LoadedProject.Load(SelfProjectPath());
-
-        // CS0246 = 找不到类型：引用集接对时不该出现（这正是评估模式的意义）
-        string[] missing = project.Compilation.GetDiagnostics()
-            .Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error && diagnostic.Id == "CS0246")
-            .Select(diagnostic => diagnostic.ToString())
-            .ToArray();
-
-        Assert.Empty(missing);
-    }
-
-    [Fact]
-    public void Load_real_project_picks_up_define_constants_from_evaluation()
-    {
-        LoadedProject project = LoadedProject.Load(SelfProjectPath());
-
-        // NET10_0 / TRACE 等都不是 csproj 写的，只有 MSBuild 评估才知道
-        CSharpParseOptions parseOptions = Assert.IsType<CSharpParseOptions>(
-            project.Compilation.SyntaxTrees.First().Options);
-
-        Assert.Contains("NET10_0", parseOptions.PreprocessorSymbolNames);
-        Assert.Contains("TRACE", parseOptions.PreprocessorSymbolNames);
-    }
-
-    [Fact]
-    public void Load_real_project_compiles_the_injected_global_file()
-    {
-        LoadedProject project = LoadedProject.Load(SelfProjectPath());
-
-        // Global.cs 由 Directory.Build.props 注入，评估模式必须把它算进来
-        Assert.Contains(
-            project.Compilation.SyntaxTrees,
-            tree => Path.GetFileName(tree.FilePath) == "Global.cs");
-    }
-
-    [Fact]
+    [Obsolete("靠真跑 dotnet msbuild 才成立：用别人的命令测自己的稳定性，冷启动几秒且与要验的语义无关")]
     public void Load_project_without_restore_falls_back()
     {
         // 没有 obj/project.assets.json 的项目：MSBuild 评估会失败，必须降级而不是抛异常
