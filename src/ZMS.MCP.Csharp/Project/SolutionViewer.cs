@@ -47,7 +47,7 @@ public static class SolutionViewer
             throw new FileNotFoundException($"解决方案不存在：{fullPath}");
         }
 
-        if (!fullPath.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase))
+        if (!fullPath.EndsWith(".slnx", PathComparison.Comparison))
         {
             throw new InvalidOperationException(
                 $"只能查看 .slnx：{Path.GetFileName(fullPath)}。请先用「迁移解决方案为 slnx」把它迁过来。");
@@ -67,7 +67,7 @@ public static class SolutionViewer
     public static string MigrateToSlnx(string path, bool force = false)
     {
         string solution = ResolveSolutionFile(path);
-        if (solution.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase))
+        if (solution.EndsWith(".slnx", PathComparison.Comparison))
         {
             throw new InvalidOperationException($"{Path.GetFileName(solution)} 已经是 slnx 了。");
         }
@@ -123,8 +123,8 @@ public static class SolutionViewer
             throw new FileNotFoundException($"路径不存在：{full}");
         }
 
-        string? slnx = Directory.GetFiles(full, "*.slnx").OrderBy(name => name, StringComparer.OrdinalIgnoreCase).FirstOrDefault();
-        string? sln = Directory.GetFiles(full, "*.sln").OrderBy(name => name, StringComparer.OrdinalIgnoreCase).FirstOrDefault();
+        string? slnx = Directory.GetFiles(full, "*.slnx").OrderBy(name => name, PathComparison.Comparer).FirstOrDefault();
+        string? sln = Directory.GetFiles(full, "*.sln").OrderBy(name => name, PathComparison.Comparer).FirstOrDefault();
         return slnx ?? sln ?? throw new FileNotFoundException($"这个文件夹里没有解决方案文件：{full}");
     }
 

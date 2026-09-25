@@ -123,7 +123,7 @@ public sealed class ProjectFileInfo
     private static List<string> CollectSourceFiles(XElement root, string directory)
     {
         bool useDefaultItems = !string.Equals(ReadProperty(root, "EnableDefaultCompileItems"), "false", StringComparison.OrdinalIgnoreCase);
-        HashSet<string> files = new(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> files = new(PathComparison.Comparer);
 
         if (useDefaultItems)
         {
@@ -143,7 +143,7 @@ public sealed class ProjectFileInfo
             ApplyPattern(directory, pattern, files, remove: true);
         }
 
-        return files.OrderBy(file => file, StringComparer.OrdinalIgnoreCase).ToList();
+        return files.OrderBy(file => file, PathComparison.Comparer).ToList();
     }
 
     private static void ApplyPattern(string directory, string pattern, HashSet<string> files, bool remove)

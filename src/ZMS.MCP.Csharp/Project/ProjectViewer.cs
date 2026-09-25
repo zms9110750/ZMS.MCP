@@ -58,7 +58,7 @@ public static class ProjectViewer
     /// </summary>
     private static void AddImportedAncestors(List<DeclarationFile> files, string startFile)
     {
-        HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase) { Path.GetFullPath(startFile) };
+        HashSet<string> seen = new(PathComparison.Comparer) { Path.GetFullPath(startFile) };
         string current = startFile;
         for (int depth = 0; depth < MaxImportedAncestors; depth++)
         {
@@ -237,7 +237,7 @@ public static class ProjectViewer
             return Path.GetFullPath(trimmed);
         }
 
-        if (trimmed.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
+        if (trimmed.EndsWith(".csproj", PathComparison.Comparison))
         {
             throw new FileNotFoundException($"项目文件不存在：{trimmed}");
         }
@@ -313,12 +313,12 @@ public static class ProjectViewer
         while (directory != null && depth < MaxAncestorDepth)
         {
             string[] found = Directory.GetFiles(directory.FullName, "*" + fileName, SearchOption.TopDirectoryOnly)
-                .Where(path => Path.GetFileName(path).Equals(fileName, StringComparison.OrdinalIgnoreCase)
-                    || (fileName.StartsWith('.') && Path.GetExtension(path).Equals(fileName, StringComparison.OrdinalIgnoreCase)))
+                .Where(path => Path.GetFileName(path).Equals(fileName, PathComparison.Comparison)
+                    || (fileName.StartsWith('.') && Path.GetExtension(path).Equals(fileName, PathComparison.Comparison)))
                 .ToArray();
             if (found.Length > 0)
             {
-                return found.OrderBy(path => path, StringComparer.OrdinalIgnoreCase).First();
+                return found.OrderBy(path => path, PathComparison.Comparer).First();
             }
 
             directory = directory.Parent;

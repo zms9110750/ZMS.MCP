@@ -82,7 +82,7 @@ public static class SolutionExplorer
         List<string> scanned = EnumerateFiles(root, depth, extensions);
         List<string> solutions = CollectSolutions(scanned);
         List<string> projectFiles = scanned
-            .Where(file => string.Equals(Path.GetExtension(file), ".csproj", StringComparison.OrdinalIgnoreCase))
+            .Where(file => string.Equals(Path.GetExtension(file), ".csproj", PathComparison.Comparison))
             .ToList();
 
         // 每个解决方案描述的项目；被任何解决方案描述过的项目都不再算"额外关系"或"散装"
@@ -136,7 +136,7 @@ public static class SolutionExplorer
                 .Where(project => owner.TryGetValue(project, out string? ownerSolution) && ownerSolution == solution)
                 .Where(project => !describedAnywhere.Contains(project))
                 .Select(project => Describe(root, project))
-                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .OrderBy(path => path, PathComparison.Comparer)
                 .ToList();
 
             groups.Add(new ScanSolutionGroup(Describe(root, solution), describedPaths, extra));
@@ -145,7 +145,7 @@ public static class SolutionExplorer
         List<string> loose = projectFiles
             .Where(project => !describedAnywhere.Contains(project) && !owner.ContainsKey(project))
             .Select(project => Describe(root, project))
-            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(path => path, PathComparison.Comparer)
             .ToList();
 
         return new ScanResult(groups, loose);
@@ -177,7 +177,7 @@ public static class SolutionExplorer
             }
         }
 
-        return byKey.Values.OrderBy(file => file, StringComparer.OrdinalIgnoreCase).ToList();
+        return byKey.Values.OrderBy(file => file, PathComparison.Comparer).ToList();
     }
 
     private static IReadOnlyList<SolutionProject> ReadProjectsSafe(string solutionPath)
@@ -216,7 +216,7 @@ public static class SolutionExplorer
         string prefix = normalized.EndsWith(Path.DirectorySeparatorChar)
             ? normalized
             : normalized + Path.DirectorySeparatorChar;
-        return Path.GetFullPath(file).StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+        return Path.GetFullPath(file).StartsWith(prefix, PathComparison.Comparison);
     }
 
     private static List<string> EnumerateFiles(string root, int depth, HashSet<string> extensions)
@@ -380,7 +380,7 @@ public static class SolutionExplorer
             throw new FileNotFoundException($"解决方案不存在：{solution}");
         }
 
-        if (!solution.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase))
+        if (!solution.EndsWith(".slnx", PathComparison.Comparison))
         {
             throw new InvalidOperationException(
                 $"编辑解决方案只能对 .slnx 进行：{Path.GetFileName(solution)}。请先用「迁移解决方案为 slnx」把它迁过来。");

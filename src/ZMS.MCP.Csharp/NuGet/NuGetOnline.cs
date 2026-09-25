@@ -131,7 +131,7 @@ public static class NuGetOnline
             // zip 里的条目名大小写不保证与 nuspec 声明一致（打包工具各异），这里按不敏感比较更稳。
             string candidate = name.Replace('\\', '/');
             if (!candidate.Equals(wanted, StringComparison.OrdinalIgnoreCase)
-                && !Path.GetFileName(candidate).Equals(wantedFile, StringComparison.OrdinalIgnoreCase))
+                && !Path.GetFileName(candidate).Equals(wantedFile, PathComparison.Comparison))
             {
                 continue;
             }

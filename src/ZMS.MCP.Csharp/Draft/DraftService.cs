@@ -585,7 +585,7 @@ public static class DraftService
             {
                 mismatched.Add($"{file.FilePath}：许可里没有这个文件（本次改动范围变了）");
             }
-            else if (!string.Equals(filePermit.FileHash, FileWriter.ComputeHash(file.FilePath), StringComparison.OrdinalIgnoreCase))
+            else if (!string.Equals(filePermit.FileHash, FileWriter.ComputeHash(file.FilePath), PathComparison.Comparison))
             {
                 mismatched.Add($"{file.FilePath} 在发许可之后被外部改过");
             }
@@ -597,13 +597,13 @@ public static class DraftService
                     continue;
                 }
 
-                if (!string.Equals(permit.FilePath, file.FilePath, StringComparison.OrdinalIgnoreCase))
+                if (!string.Equals(permit.FilePath, file.FilePath, PathComparison.Comparison))
                 {
                     mismatched.Add($"{symbol}：文件从 {permit.FilePath} 变成 {file.FilePath}（移动/改名）");
                     continue;
                 }
 
-                if (!string.Equals(permit.FileHash, FileWriter.ComputeHash(file.FilePath), StringComparison.OrdinalIgnoreCase))
+                if (!string.Equals(permit.FileHash, FileWriter.ComputeHash(file.FilePath), PathComparison.Comparison))
                 {
                     mismatched.Add($"{symbol}：{file.FilePath} 在发许可之后被外部改过");
                 }
@@ -658,7 +658,7 @@ public static class DraftService
         [
             .. files
                 .Select(file => file.Key)
-                .Where(path => !string.Equals(beforeFormat[path], FileWriter.ComputeHash(path), StringComparison.OrdinalIgnoreCase)),
+                .Where(path => !string.Equals(beforeFormat[path], FileWriter.ComputeHash(path), PathComparison.Comparison)),
         ];
 
         if (!formatted)
@@ -682,7 +682,7 @@ public static class DraftService
         builder.AppendLine("## 已落盘");
         foreach (KeyValuePair<string, string> file in files)
         {
-            builder.AppendLine(skipped.Contains(file.Key, StringComparer.OrdinalIgnoreCase)
+            builder.AppendLine(skipped.Contains(file.Key, PathComparison.Comparer)
                 ? $"- {file.Key}（内容未变，跳过）"
                 : $"- {file.Key}");
         }
@@ -828,7 +828,7 @@ public static class DraftService
         // 落盘时每个文件只取**最后一条**改动，所以"同一文件里既要补 partial 又要加成员"
         // 必须合成一条：在补完 partial 的内容上再加成员，否则前一条会被后一条盖掉。
         CodeChange? sameFile = partials.FirstOrDefault(
-            change => change.FilePath.Equals(added.FilePath, StringComparison.OrdinalIgnoreCase));
+            change => change.FilePath.Equals(added.FilePath, PathComparison.Comparison));
         if (sameFile != null)
         {
             partials.Remove(sameFile);
@@ -844,7 +844,7 @@ public static class DraftService
     internal static List<CodeChange> EnsurePartial(INamedTypeSymbol type)
     {
         List<CodeChange> changes = [];
-        Dictionary<string, List<SyntaxNode>> perFile = new(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, List<SyntaxNode>> perFile = new(PathComparison.Comparer);
         foreach (SyntaxReference reference in type.DeclaringSyntaxReferences)
         {
             SyntaxNode node = reference.GetSyntax();

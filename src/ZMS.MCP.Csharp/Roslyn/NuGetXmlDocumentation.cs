@@ -104,7 +104,7 @@ public static class NuGetXmlDocumentation
             throw new FileNotFoundException($"该 TFM 下没有 XML 文档文件：{targetDirectory}");
         }
 
-        Array.Sort(xmlFiles, StringComparer.OrdinalIgnoreCase);
+        Array.Sort(xmlFiles, PathComparison.Comparer);
         return new DocSource(packageName.Trim(), resolvedVersion, resolvedTarget, xmlFiles);
     }
 

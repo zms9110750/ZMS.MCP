@@ -338,10 +338,10 @@ public static class SymbolLocator
                 Locations: (IReadOnlyList<(string FilePath, int Line)>)
                 [
                     .. pair.Value
-                        .OrderBy(item => item.FilePath, StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(item => item.FilePath, PathComparison.Comparer)
                         .ThenBy(item => item.Line),
                 ]))
-            .OrderBy(item => item.Locations[0].FilePath, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(item => item.Locations[0].FilePath, PathComparison.Comparer)
             .ThenBy(item => item.Locations[0].Line)
             .ToList();
     }

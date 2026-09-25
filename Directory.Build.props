@@ -1,4 +1,4 @@
-﻿<Project>
+<Project>
 
   <!-- ===== 项目通用元数据 ===== -->
   <PropertyGroup>
@@ -30,4 +30,8 @@
     <Compile Include="$(MSBuildThisFileDirectory)Global.cs" />
   </ItemGroup>
 
+  <!-- 平台常量：供 PathComparison 用条件编译选择路径比较口径（Windows 文件系统不区分大小写） -->
+  <PropertyGroup Condition="'$(OS)' == 'Windows_NT'">
+    <DefineConstants>$(DefineConstants);WINDOWS</DefineConstants>
+  </PropertyGroup>
 </Project>

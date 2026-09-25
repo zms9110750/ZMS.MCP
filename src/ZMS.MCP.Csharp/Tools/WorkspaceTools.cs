@@ -25,12 +25,12 @@ public static class WorkspaceTools
         {
             string trimmed = (path ?? "").Trim();
             string full = Path.GetFullPath(trimmed);
-            if (File.Exists(full) && full.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase))
+            if (File.Exists(full) && full.EndsWith(".slnx", PathComparison.Comparison))
             {
                 return SolutionViewer.ViewTree(full);
             }
 
-            if (File.Exists(full) && full.EndsWith(".sln", StringComparison.OrdinalIgnoreCase))
+            if (File.Exists(full) && full.EndsWith(".sln", PathComparison.Comparison))
             {
                 throw new InvalidOperationException(
                     $"只能查看 .slnx：{Path.GetFileName(full)}。请先用「迁移解决方案为 slnx」把它迁过来。");

@@ -29,7 +29,7 @@ public static class DraftPlanner
     public static Plan Compute(LoadedProject project, IReadOnlyList<DraftEdit> edits)
     {
         CSharpCompilation compilation = project.Compilation;
-        Dictionary<string, PlannedFileBuilder> files = new(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, PlannedFileBuilder> files = new(PathComparison.Comparer);
         List<string> missing = [];
 
         // **定向**判断"原本存在的符号现在还找得到吗"：不建全量符号基线
@@ -119,7 +119,7 @@ public static class DraftPlanner
             .FirstOrDefault()
             ?? new CSharpParseOptions(LanguageVersion.Preview);
         SyntaxTree? existing = compilation.SyntaxTrees
-            .FirstOrDefault(tree => tree.FilePath.Equals(filePath, StringComparison.OrdinalIgnoreCase));
+            .FirstOrDefault(tree => tree.FilePath.Equals(filePath, PathComparison.Comparison));
         CSharpParseOptions options = existing is CSharpSyntaxTree csharp
             ? csharp.Options
             : baseline;

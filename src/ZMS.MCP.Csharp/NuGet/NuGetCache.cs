@@ -118,7 +118,7 @@ public static class NuGetCache
             return expected;
         }
 
-        return Directory.GetFiles(directory, "*.nuspec").OrderBy(name => name, StringComparer.OrdinalIgnoreCase).FirstOrDefault();
+        return Directory.GetFiles(directory, "*.nuspec").OrderBy(name => name, PathComparison.Comparer).FirstOrDefault();
     }
 
     /// <summary>读本地元数据（含 readme）；本地没有这个版本时返回 null。</summary>
