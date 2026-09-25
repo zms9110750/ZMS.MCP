@@ -13,11 +13,7 @@ namespace ZMS.MCP.Csharp.Tools;
 [McpServerToolType]
 public static class WorkspaceTools
 {
-    [McpServerTool(ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
-    [Description(
-        "Show a .slnx as a tree, including its virtual folders (Folder Name=\"/src/\"). " +
-        "Different from the project scan view: this one mirrors the solution file itself. " +
-        "Editing solutions is only supported for .slnx, so .sln must be migrated first.")]
+    /// <summary>查看 slnx 树（原来注册为 `view_solution_tree`；现在并入 `view` 工具，这里只保留实现）。</summary>
     public static string ViewSolutionTree(
         [Description("Path to the .slnx file (or to a folder containing it)")] string path)
     {
@@ -26,10 +22,41 @@ public static class WorkspaceTools
 
     [McpServerTool(ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
-        "Show a csproj verbatim, then every file that takes part in declaring it and can be found upwards: " +
-        "the nearest Directory.Build.props, Directory.Packages.props, Directory.Build.targets, global.json, NuGet.config, " +
-        "and the restore-generated obj/<project>.csproj.nuget.g.props|targets. " +
-        "csprojPath may be a full path, or just a project name when that name is unique in the nearest solution.")]
+        "View something by path - one tool, three kinds of target, chosen by what the path points at. " +
+        "Folder: scans it and reports every solution with its described projects, plus the projects no solution covers (depth / kinds apply). " +
+        "csproj (a full path, or a project name that is unique in the nearest solution): prints the csproj verbatim, then every file that takes part in declaring it and can be found upwards. " +
+        "slnx: prints the solution as a tree, virtual folders included. " +
+        "A .sln is refused the same way it used to be, with a hint to migrate it first.")]
+    public static string View(
+        [Description("Folder to scan, or a csproj (full path or unique project name), or a .slnx file")] string path,
+        [Description("Max recursion depth when path is a folder (default 4)")] int depth = 4,
+        [Description("Kinds to include when path is a folder, comma separated: sln,slnx,csproj. Empty = all three")] string kinds = "")
+    {
+        return ToolGuard.Run(() =>
+        {
+            string trimmed = (path ?? "").Trim();
+            string full = Path.GetFullPath(trimmed);
+            if (Directory.Exists(full))
+            {
+                return ProjectTools.ScanProjects(full, depth, kinds);
+            }
+
+            if (File.Exists(full) && full.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase))
+            {
+                return SolutionViewer.ViewTree(full);
+            }
+
+            if (File.Exists(full) && full.EndsWith(".sln", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"只能查看 .slnx：{Path.GetFileName(full)}。请先用「迁移解决方案为 slnx」把它迁过来。");
+            }
+
+            return ProjectViewer.View(trimmed);
+        });
+    }
+
+    /// <summary>查看项目（原来注册为 `view_project`；现在并入 `view` 工具，这里只保留实现）。</summary>
     public static string ViewProject(
         [Description("csproj path, or a unique project name")] string csprojPath)
     {

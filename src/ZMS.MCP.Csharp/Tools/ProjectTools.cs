@@ -9,12 +9,7 @@ namespace ZMS.MCP.Csharp.Tools;
 [McpServerToolType]
 public static class ProjectTools
 {
-    [McpServerTool(ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
-    [Description(
-        "Scan a folder for .sln / .slnx / .csproj. Output: one block per solution — " +
-        "'<solution path>(described+extra)' then its described projects as a tree (├─ / └─), " +
-        "then the projects that exist under the solution folder but are NOT described by it, prefixed with '-'. " +
-        "Projects not covered by any solution follow as plain lines. bin/obj/.git are skipped.")]
+    /// <summary>扫描文件夹（原来注册为 `scan_projects`；现在并入 `view` 工具，这里只保留实现）。</summary>
     public static string ScanProjects(
         [Description("Absolute path of the folder to scan")] string path,
         [Description("Max recursion depth (default 4)")] int depth = 4,
