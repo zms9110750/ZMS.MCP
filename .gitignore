@@ -367,3 +367,7 @@ FodyWeavers.xsd
 
 # 下载目录（仅限根目录）
 /download/
+
+# Reasonix 的内部工作目录（记忆 / 技能 / 配置），不进版本控制
+.reasonix/
+TestResults/
