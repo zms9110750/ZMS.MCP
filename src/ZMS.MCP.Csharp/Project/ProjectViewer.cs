@@ -123,12 +123,19 @@ public static class ProjectViewer
             return null;
         }
 
+        if (value.Contains("$(MSBuildThisFileFullPath)", StringComparison.OrdinalIgnoreCase))
+        {
+            // 这是"当前文件的完整路径"，这个函数只拿到目录、拿不到它。替换成空串会把 Import
+            // 解析到盘根（如 "\..\common.props"），可能命中一个无关的同名文件；
+            // 按本函数"解析不出来就不猜"的原则，直接放弃。
+            return null;
+        }
+
         string withSeparator = directory.EndsWith(Path.DirectorySeparatorChar)
             ? directory
             : directory + Path.DirectorySeparatorChar;
         string expanded = value
             .Replace("$(MSBuildThisFileDirectory)", withSeparator, StringComparison.OrdinalIgnoreCase)
-            .Replace("$(MSBuildThisFileFullPath)", "", StringComparison.OrdinalIgnoreCase)
             .Trim();
         if (expanded.Length == 0 || expanded.Contains("$(", StringComparison.Ordinal) || expanded.Contains('*'))
         {
