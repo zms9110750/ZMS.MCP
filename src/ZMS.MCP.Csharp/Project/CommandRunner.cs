@@ -15,6 +15,28 @@ public static class CommandRunner
     private const int DefaultTimeoutSeconds = 300;
 
     /// <summary>
+    /// 累积输出的上限（字符数）。dotnet build/restore 的输出可能极大，而 MCP 服务是长驻进程：
+    /// 不设上限就是无界内存增长。超了就停止累积，只在末尾标注一次。
+    /// </summary>
+    private const int OutputLimit = 200_000;
+
+    private static void AppendCapped(StringBuilder output, string line, ref bool truncated)
+    {
+        if (output.Length >= OutputLimit)
+        {
+            if (!truncated)
+            {
+                truncated = true;
+                output.AppendLine("（输出过长，后续已省略）");
+            }
+
+            return;
+        }
+
+        output.AppendLine(line);
+    }
+
+    /// <summary>
     /// 跑一个命令并等它结束。超时会连**整棵进程树**一起杀，避免留下孤儿进程卡住构建输出。
     /// </summary>
     public static CommandResult Run(
@@ -39,13 +61,14 @@ public static class CommandRunner
 
         using Process process = new() { StartInfo = startInfo };
         StringBuilder output = new();
+        bool truncated = false;
         process.OutputDataReceived += (_, eventArgs) =>
         {
             if (eventArgs.Data != null)
             {
                 lock (output)
                 {
-                    output.AppendLine(eventArgs.Data);
+                    AppendCapped(output, eventArgs.Data, ref truncated);
                 }
             }
         };
@@ -55,7 +78,7 @@ public static class CommandRunner
             {
                 lock (output)
                 {
-                    output.AppendLine(eventArgs.Data);
+                    AppendCapped(output, eventArgs.Data, ref truncated);
                 }
             }
         };
