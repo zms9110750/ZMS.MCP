@@ -110,22 +110,29 @@ public static class ConflictService
 
         IReadOnlyDictionary<string, string> now = current ?? SymbolBaseline.Capture(LoadedProject.Load(projectPath).Compilation);
 
-        // 以「现状」为底：该符号（及其类型链）天然对齐了
-        Dictionary<string, string> rebuilt = new(now, StringComparer.Ordinal);
+        // 以**基线**为底重建：只把被解决的符号（及其类型链）换成"现在的 hash"，其余一律保留旧 hash。
+        // 这一步很关键 —— 若以「现状」为底，「基线里没有、现状里新增」的符号（Added 冲突）
+        // 会被顺手静默接受，于是每解决一个符号就吞掉一批外部新增，预检再也报不出来。
+        Dictionary<string, string> rebuilt = new(StringComparer.Ordinal);
         foreach (KeyValuePair<string, string> pair in tracking.Baseline)
         {
             if (IsRelated(pair.Key, symbolKey))
             {
+                if (now.TryGetValue(pair.Key, out string? value))
+                {
+                    rebuilt[pair.Key] = value;
+                }
+
                 continue;
             }
 
-            if (IsAligned(now, pair.Key, pair.Value))
-            {
-                continue;
-            }
-
-            // 别的未解决冲突保持原样，继续报出来
             rebuilt[pair.Key] = pair.Value;
+        }
+
+        // 被解决的符号本身若是"新增"（基线里没有它），显式按现状写进去 —— 它就是这次要接受的那个。
+        if (!rebuilt.ContainsKey(symbolKey) && now.TryGetValue(symbolKey, out string? accepted))
+        {
+            rebuilt[symbolKey] = accepted;
         }
 
         store.SaveTracking(projectPath, tracking.TrackingCookie, rebuilt);
@@ -136,10 +143,5 @@ public static class ConflictService
     {
         return key.Equals(symbolKey, StringComparison.Ordinal)
             || symbolKey.StartsWith(key + ".", StringComparison.Ordinal);
-    }
-
-    private static bool IsAligned(IReadOnlyDictionary<string, string> current, string key, string savedHash)
-    {
-        return current.TryGetValue(key, out string? now) && string.Equals(now, savedHash, StringComparison.Ordinal);
     }
 }
