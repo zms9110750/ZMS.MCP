@@ -149,6 +149,6 @@ public static class NuGetOnline
     private static T GetResource<T>()
         where T : class, INuGetResource
     {
-        return Source.GetResourceAsync<T>().GetAwaiter().GetResult();
+        return Source.GetResourceAsync<T>().GetAwaiter().GetResult()!;
     }
 }
