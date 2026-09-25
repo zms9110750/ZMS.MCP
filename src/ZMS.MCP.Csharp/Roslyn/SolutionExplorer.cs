@@ -404,7 +404,7 @@ public static class SolutionExplorer
             startInfo.ArgumentList.Add(argument);
         }
 
-        using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start 'dotnet'. Is the .NET SDK on PATH?");
+        using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException("启动 'dotnet' 失败：确认 .NET SDK 已安装且在 PATH 中。");
         Task<string> stdout = process.StandardOutput.ReadToEndAsync();
         Task<string> stderr = process.StandardError.ReadToEndAsync();
         using CancellationTokenSource timeout = new(TimeSpan.FromMinutes(2));
@@ -423,7 +423,18 @@ public static class SolutionExplorer
                 // 进程可能已退出，忽略
             }
 
-            return (-1, "dotnet command timed out after 120s.");
+            // 杀完必须把两个读任务收掉：否则它们随 process 一起被 dispose（流随之关闭），
+            // 变成未观察的异常，或永远读不完而挂住。
+            try
+            {
+                await Task.WhenAll(stdout, stderr);
+            }
+            catch (Exception)
+            {
+                // 进程被杀，读任务可能带异常结束；这里只求"收干净"
+            }
+
+            return (-1, $"dotnet 命令超时（120s）：dotnet {string.Join(' ', arguments)}");
         }
 
         string output = (await stdout).Trim() + "\n" + (await stderr).Trim();
@@ -432,7 +443,7 @@ public static class SolutionExplorer
 
     private static HashSet<string> ParseKinds(string kind)
     {
-        HashSet<string> extensions = new(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> extensions = new(PathComparison.Comparer);
         foreach (string item in kind.Split([',', ';', ' '], StringSplitOptions.RemoveEmptyEntries))
         {
             string trimmed = item.Trim().TrimStart('*', '.');
