@@ -17,8 +17,12 @@ public static class PermitStore
     /// <summary>落盘许可：project_path → （cookie + 许可快照）。</summary>
     private static readonly Dictionary<string, ApplyPermit> Applies = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>选择许可：`project_path\u0001symbol` → 选择许可。</summary>
-    private static readonly Dictionary<string, SelectPermit> Selects = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>
+    /// 选择许可：`project_path\u0001symbol` → 选择许可。
+    /// 键里含 **C# 符号**（区分大小写），所以这里用 <see cref="StringComparer.Ordinal"/>：
+    /// 用不敏感比较会把 `Ns.Foo.Bar` 与 `ns.foo.bar` 当成同一个符号，可能取到别人的许可。
+    /// </summary>
+    private static readonly Dictionary<string, SelectPermit> Selects = new(StringComparer.Ordinal);
 
     /// <summary>拟定变了 / 落盘了 / 取消追踪了 → 该项目的两种许可都作废。</summary>
     public static void Invalidate(string projectPath)
@@ -28,7 +32,7 @@ public static class PermitStore
         {
             Applies.Remove(key);
             foreach (string selectKey in Selects.Keys
-                .Where(item => item.StartsWith(key + "\u0001", StringComparison.OrdinalIgnoreCase))
+                .Where(item => item.StartsWith(key + "\u0001", StringComparison.Ordinal))
                 .ToList())
             {
                 Selects.Remove(selectKey);
