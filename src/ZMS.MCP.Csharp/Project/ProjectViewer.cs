@@ -251,9 +251,9 @@ public static class ProjectViewer
         }
 
         List<string> matches = SolutionExplorer.ReadProjects(solution)
-            .Where(project => project.Name.Equals(trimmed, StringComparison.OrdinalIgnoreCase))
+            .Where(project => project.Name.Equals(trimmed, PathComparison.Comparison))
             .Select(project => project.AbsolutePath)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Distinct(PathComparison.Comparer)
             .ToList();
 
         return matches.Count switch

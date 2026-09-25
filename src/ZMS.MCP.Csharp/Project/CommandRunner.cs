@@ -70,7 +70,7 @@ public static class CommandRunner
             {
                 process.Kill(entireProcessTree: true);
             }
-            catch (Exception exception) when (exception is InvalidOperationException or NotSupportedException)
+            catch (Exception exception) when (exception is InvalidOperationException or NotSupportedException or System.ComponentModel.Win32Exception)
             {
                 // 进程已经退出或平台不支持整树杀，忽略
             }
