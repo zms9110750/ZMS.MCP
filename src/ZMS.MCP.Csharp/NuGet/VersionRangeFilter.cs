@@ -43,19 +43,10 @@ public sealed class VersionRangeFilter
     public static VersionRangeFilter Parse(string text)
     {
         string trimmed = (text ?? "").Trim();
-        if (trimmed.Length == 0)
+        if (trimmed.Length == 0 || trimmed == "*")
         {
-            // 空 = 只列正式版：下界 0.0.0、无上界，预览版由 IncludePrerelease 挡掉
-            return new VersionRangeFilter(
-                NuGetRange.Parse("[0.0.0,)"),
-                includePrerelease: false,
-                "release versions only (>= 0.0.0)",
-                []);
-        }
-
-        if (trimmed == "*")
-        {
-            // * = 所有正式版 = [0.0.0,9999.9999.9999]
+            // 空串与 `*` 等价（审查意见）：都是「所有正式版」= [0.0.0,9999.9999.9999]；
+            // 预览版由 IncludePrerelease 挡掉。
             return new VersionRangeFilter(
                 NuGetRange.Parse($"[0.0.0,{ReleaseCeiling}]"),
                 includePrerelease: false,
