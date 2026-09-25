@@ -101,6 +101,60 @@ public sealed class RenderingTests
     }
 
     [Fact]
+    public void MemberSignature_shows_every_property_modifier_but_hides_only_the_accessor_bodies()
+    {
+        INamedTypeSymbol type = TypeOf(
+            """
+            namespace Demo;
+            public class Shape
+            {
+                private int _reference;
+                public ref int Reference { get { return ref _reference; } }
+                public ref readonly int CurReference { get { return ref _reference; } }
+                public int Value { get; private set; }
+                public required string Name { get; init; }
+                public override string ToString() { return ""; }
+            }
+            """,
+            "Demo.Shape");
+
+        // 属性本身的 ref / 访问权限 / 访问器访问权限全都在签名里
+        Assert.Equal(
+            "public ref int Reference { get { … } }",
+            CodeEditor.MemberSignature(type.GetMembers("Reference").Single()));
+        Assert.Equal(
+            "public ref readonly int CurReference { get { … } }",
+            CodeEditor.MemberSignature(type.GetMembers("CurReference").Single()));
+        Assert.Equal(
+            "public int Value { get; private set; }",
+            CodeEditor.MemberSignature(type.GetMembers("Value").Single()));
+        // override（继承自 object）与 required / init 也要显示
+        Assert.Contains("override", CodeEditor.MemberSignature(type.GetMembers("ToString").Single()), StringComparison.Ordinal);
+        Assert.Equal(
+            "public required string Name { get; init; }",
+            CodeEditor.MemberSignature(type.GetMembers("Name").Single()));
+    }
+
+    [Fact]
+    public void MemberSignature_shows_readonly_on_a_struct_property_and_on_its_accessor()
+    {
+        INamedTypeSymbol type = TypeOf(
+            """
+            namespace Demo;
+            public struct Point
+            {
+                private int _x;
+                public readonly int X { get { return _x; } }
+                public int Y { readonly get { return _x; } set { _x = value; } }
+            }
+            """,
+            "Demo.Point");
+
+        Assert.Equal("public readonly int X { get { … } }", CodeEditor.MemberSignature(type.GetMembers("X").Single()));
+        Assert.Equal("public int Y { readonly get { … } set { … } }", CodeEditor.MemberSignature(type.GetMembers("Y").Single()));
+    }
+
+    [Fact]
     public void DescribeType_lists_members_without_bodies()
     {
         INamedTypeSymbol type = TypeOf(

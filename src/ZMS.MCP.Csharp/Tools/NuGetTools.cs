@@ -76,25 +76,26 @@ public static class NuGetTools
     [McpServerTool(ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = true)]
     [Description(
         "List versions of one exact package id. local = local cache, web = nuget.org. " +
-        "verRange filters by a NuGet version range (e.g. '[13.0,14.0)'); '*' = all versions including prerelease. " +
-        "The header always reports how many versions were left out.")]
+        "verRange is a NuGet version range (parsed by the NuGet VersionRange API) and EVERY version inside it is listed, never just one. " +
+        "empty = release versions only; '*' = all release versions (same as [0.0.0,9999.9999.9999]); '*-*' = include prerelease too; " +
+        "range syntax such as '[13.0,14.0)' or a floating form such as '1.2.*' works as well. " +
+        "The header reports how many prerelease versions were left out.")]
     public static string ListPackageVersions(
         [Description("Exact package id")] string packName,
-        [Description("Version range filter; empty = release versions only, '*' = include prerelease")] string verRange = "",
+        [Description("NuGet version range; empty = release only, '*' = all release, '*-*' = include prerelease")] string verRange = "",
         [Description("Query the local NuGet cache")] bool local = true,
         [Description("Query nuget.org")] bool web = false)
     {
         return ToolGuard.Run(() =>
         {
-            bool includePrerelease = verRange.Trim() == "*";
-            VersionRange range;
+            VersionRangeFilter filter;
             try
             {
-                range = VersionRange.Parse(verRange);
+                filter = VersionRangeFilter.Parse(verRange);
             }
             catch (ArgumentException exception)
             {
-                throw new InvalidOperationException($"版本范围格式不对：{exception.Message}");
+                throw new InvalidOperationException($"Bad version range: {exception.Message}");
             }
 
             List<ComparableVersion> localVersions = [.. NuGetCache.Versions(packName)];
@@ -113,28 +114,27 @@ public static class NuGetTools
                 }
             }
 
-            List<ComparableVersion> matched = [.. versions.Where(range.Contains)];
-            List<ComparableVersion> prerelease = [.. matched.Where(version => version.IsPrerelease)];
-            List<ComparableVersion> shown = [.. matched.Where(version => includePrerelease || !version.IsPrerelease)];
+            // 范围里符合的**全部**版本；预览版是否列出由 filter 决定
+            List<ComparableVersion> inRange = [.. versions.Where(filter.MatchesRange)];
+            List<ComparableVersion> shown = filter.IncludePrerelease
+                ? inRange
+                : [.. inRange.Where(version => !version.IsPrerelease)];
             shown.Sort();
             shown.Reverse();
 
             StringBuilder builder = new();
             builder.AppendLine($"# {packName}（{source}）");
-            if (includePrerelease)
+            builder.AppendLine($"> 范围 {filter.Description}：共列出 {shown.Count} 个版本");
+            if (!filter.IncludePrerelease)
             {
-                // 预览版为 0 时就别写"其中预览版 0 个"
-                builder.AppendLine(prerelease.Count > 0
-                    ? $"> 共查询到 {shown.Count} 个版本，其中预览版 {prerelease.Count} 个"
-                    : $"> 共查询到 {shown.Count} 个版本");
+                // 挡掉的预览版要说出来，否则"少了几个"看起来像工具算错了
+                int leftOut = inRange.Count - shown.Count;
+                if (leftOut > 0)
+                {
+                    builder.AppendLine($"（另有 {leftOut} 个预览版落在范围内，未列出；verRange 用 `*-*` 才会列出）");
+                }
             }
-            else
-            {
-                int leftOut = matched.Count - shown.Count;
-                builder.AppendLine(leftOut > 0
-                    ? $"> 共筛选到 {shown.Count} 个版本，还有 {leftOut} 个预览版未列出"
-                    : $"> 共筛选到 {shown.Count} 个版本");
-            }
+
             builder.AppendLine();
             foreach (ComparableVersion version in shown)
             {

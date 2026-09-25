@@ -237,9 +237,9 @@ public sealed class SymbolQueryTests
     // ───────── 渲染 ─────────
 
     [Fact]
-    public void ListSymbols_renders_namespace_sections_types_and_indented_members()
+    public void Symbols_lists_like_the_old_list_symbols()
     {
-        string output = SymbolTools.ListSymbols(SelfProjectPath(), "C", "", "");
+        string output = SymbolTools.Symbols(SelfProjectPath(), "", false, "C", "", "");
 
         Assert.Contains("## ZMS.MCP.Csharp.Roslyn", output);
         Assert.Contains("- `class LoadedProject`", output);
@@ -250,17 +250,84 @@ public sealed class SymbolQueryTests
         Assert.Contains("\n  - `class ", output);
 
         // 列成员时：成员行两格缩进（正向断言，不只看"没出现"）
-        string withMembers = SymbolTools.ListSymbols(SelfProjectPath(), "M", "", "");
+        string withMembers = SymbolTools.Symbols(SelfProjectPath(), "", false, "M", "", "");
         Assert.Contains("\n  - `", withMembers);
         Assert.Contains("` (method)", withMembers);
     }
 
     [Fact]
-    public void ListSymbols_warns_about_unknown_kind_letters()
+    public void Symbols_warns_about_unknown_kind_letters()
     {
-        string output = SymbolTools.ListSymbols(SelfProjectPath(), "Cx", "", "");
+        string output = SymbolTools.Symbols(SelfProjectPath(), "", false, "Cx", "", "");
 
         Assert.Contains("无法识别的 type 字母", output);
         Assert.Contains("X", output);
+    }
+
+    [Fact]
+    public void Symbols_filters_by_name_letters_and_modifiers()
+    {
+        // nameFilter = 原来 list_types 的 filter；type = T 只列类型
+        string types = SymbolTools.Symbols(SelfProjectPath(), "", false, "T", "", "", "LoadedProject");
+
+        Assert.Contains("LoadedProject", types);
+        Assert.Contains("nameFilter='LoadedProject'", types);
+        Assert.DoesNotContain("` (method)", types);
+
+        string publics = SymbolTools.Symbols(SelfProjectPath(), "", false, "C", "public,static", "");
+
+        Assert.Contains("符号: ", publics);
+    }
+
+    [Fact]
+    public void Symbols_lists_a_types_members_when_read_is_false()
+    {
+        string output = SymbolTools.Symbols(SelfProjectPath(), "ZMS.MCP.Csharp.Draft.DraftEdit", read: false);
+
+        Assert.Contains("# ZMS.MCP.Csharp.Draft.DraftEdit", output);
+        // 成员列表带文件与行号
+        Assert.Contains(".cs:", output);
+        Assert.Contains("IsDelete", output);
+    }
+
+    [Fact]
+    public void Symbols_reads_a_type_structure_without_member_bodies()
+    {
+        string output = SymbolTools.Symbols(SelfProjectPath(), "ZMS.MCP.Csharp.Draft.SymbolBaseline", read: true);
+
+        Assert.Contains("## ", output);
+        Assert.Contains("### Members", output);
+        // 结构视图：方法只给签名、访问器只给记号
+        Assert.Contains("Capture(Compilation compilation)", output);
+        Assert.DoesNotContain("return baseline;", output);
+    }
+
+    [Fact]
+    public void Symbols_reads_one_member_with_source()
+    {
+        string output = SymbolTools.Symbols(SelfProjectPath(), "ZMS.MCP.Csharp.Draft.SymbolBaseline.Key");
+
+        Assert.Contains("## ", output);
+        Assert.Contains("```csharp", output);
+        Assert.Contains("IdentityFormat", output);
+    }
+
+    [Fact]
+    public void Symbols_reads_one_accessor_exactly_and_then_shows_its_implementation()
+    {
+        // 精确匹配到访问器 → 给实现（属性签名里只有 `get { … }` 记号）
+        string accessor = SymbolTools.Symbols(SelfProjectPath(), "ZMS.MCP.Csharp.Draft.DraftEdit.IsDelete.get");
+
+        Assert.Contains("RequestedContent == null", accessor);
+        Assert.Contains("```csharp", accessor);
+    }
+
+    [Fact]
+    public void Symbols_reports_an_unknown_member_instead_of_guessing()
+    {
+        string output = SymbolTools.Symbols(SelfProjectPath(), "ZMS.MCP.Csharp.Draft.DraftEdit.NoSuchMember");
+
+        Assert.StartsWith("Error: ", output, StringComparison.Ordinal);
+        Assert.Contains("NoSuchMember", output);
     }
 }

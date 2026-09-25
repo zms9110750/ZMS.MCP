@@ -118,17 +118,15 @@ public static class DraftService
     }
 
     /// <summary>
-    /// 拟定编辑（`docs/Csharp-拟定流程v3.md` 第三节 2）：**只记符号 + 意图 + 首次快照**，
-    /// 不算文件路径、不算整文件内容（那些留到预检/落盘现场做）；同一符号只保留一条生效条目。
+    /// 拟定编辑：**只记符号 + 意图 + 首次快照**，不算文件路径、不算整文件内容（那些留到预检/落盘现场做）；
+    /// 同一符号只保留一条生效条目。
+    /// 参数是 `track_project` 拿到的**追踪 cookie**（同一个 cookie 既用于拟定编写，也用于解除追踪）。
+    /// 重新拟定同时是「解决冲突」的手段：该符号的 hash 会被更新为现在的 hash。
     /// </summary>
-    public static string Stage(string csprojPath, string typePath, string memberName, string? content)
+    public static string Stage(string cookie, string typePath, string memberName, string? content)
     {
-        string projectPath = ProjectViewer.ResolveProjectFile(csprojPath);
         DraftStore store = new();
-        if (store.GetTracking(projectPath) == null)
-        {
-            throw new InvalidOperationException("这个项目还没有追踪：先调用 track_project（记了快照才能编辑拟定）。");
-        }
+        string projectPath = RequireProjectByCookie(store, cookie, "stage_draft");
 
         if (content != null)
         {
@@ -143,6 +141,8 @@ public static class DraftService
         store.ReplaceSymbol(projectPath, typePath, memberName, content, symbolKey, snapshot, action);
         // 拟定变了 → 落盘许可作废
         PermitStore.Invalidate(projectPath);
+        // 重新拟定 = 解决冲突：这个符号的 hash 更新为现在的 hash（其它未解决冲突不受影响）
+        ConflictService.AcceptCurrent(projectPath, symbolKey, SymbolBaseline.Capture(project.Compilation));
 
         StringBuilder builder = new();
         builder.AppendLine("# 拟定已更新");
@@ -157,6 +157,19 @@ public static class DraftService
 
         builder.AppendLine("- 落盘许可（若有）已作废：要落盘请重新 confirm_draft（不带 cookie）做预检。");
         return builder.ToString();
+    }
+
+    /// <summary>把 cookie 换成项目路径；cookie 无效就报「先 track_project」。</summary>
+    private static string RequireProjectByCookie(DraftStore store, string cookie, string tool)
+    {
+        TrackingRecord? tracking = store.GetTrackingByCookie(cookie);
+        if (tracking == null)
+        {
+            throw new InvalidOperationException(
+                $"{tool} 需要 track_project 返回的追踪 cookie（没有 cookie / cookie 无效：先 track_project 拿 cookie）。");
+        }
+
+        return tracking.ProjectPath;
     }
 
     /// <summary>解析这次编辑对应的符号身份、快照文本与动作。</summary>
@@ -223,31 +236,30 @@ public static class DraftService
     }
 
     /// <summary>
-    /// 选择器（第三节 7）：解决某个符号的冲突 —— `draft`/`snapshot`/`disk` 用选中的内容**代替现在的拟定**，
-    /// `drop` 直接删掉该符号的拟定条目。
+    /// 解决冲突（见审查意见第 6 / 7 条）：choice = `keep`（保持拟定）/ `drop`（移除拟定），
+    /// 已经没有「还原为快照」这条路。两者都把该符号的 hash 更新为**现在的 hash**；`drop` 还会删掉该符号的拟定条目。
     /// </summary>
     public static string Select(string csprojPath, string memberPath, string selectCookie, string choice)
     {
         string projectPath = ProjectViewer.ResolveProjectFile(csprojPath);
         DraftStore store = new();
         DraftRecord? record = store.Find(projectPath);
-        if (record == null || record.Edits.Count == 0)
+
+        string decision = (choice ?? "").Trim().ToLowerInvariant();
+        if (decision is not ("keep" or "drop"))
         {
-            throw new InvalidOperationException("没有未完成的拟定可以处理。");
+            throw new ArgumentException("choice 只能是 keep（保持拟定）或 drop（移除拟定）。");
         }
 
-        List<DraftEdit> matches =
-        [
-            .. record.Edits.Where(item =>
-                item.SymbolKey.Equals(memberPath, StringComparison.Ordinal)
-                || EditLabel(item).Equals(memberPath, StringComparison.Ordinal)
-                || item.MemberName.Equals(memberPath, StringComparison.Ordinal)),
-        ];
-        if (matches.Count == 0)
-        {
-            throw new InvalidOperationException($"拟定里没有这个符号：{memberPath}");
-        }
-
+        List<DraftEdit> matches = record == null
+            ? []
+            :
+            [
+                .. record.Edits.Where(item =>
+                    item.SymbolKey.Equals(memberPath, StringComparison.Ordinal)
+                    || EditLabel(item).Equals(memberPath, StringComparison.Ordinal)
+                    || item.MemberName.Equals(memberPath, StringComparison.Ordinal)),
+            ];
         if (matches.Count > 1)
         {
             // 不猜（同 §七：命中多个就报出来），让调用方用完整符号键消歧
@@ -256,43 +268,48 @@ public static class DraftService
                 + string.Join(Environment.NewLine, matches.Select(item => "  - " + item.SymbolKey)));
         }
 
-        DraftEdit edit = matches[0];
+        DraftEdit? edit = matches.Count == 1 ? matches[0] : null;
+        string symbolKey = edit?.SymbolKey ?? (memberPath ?? "").Trim();
+        if (symbolKey.Length == 0)
+        {
+            throw new InvalidOperationException("要指定一个符号路径。");
+        }
 
-        SelectPermit? permit = PermitStore.TakeSelect(projectPath, edit.SymbolKey, selectCookie);
+        if (edit == null && decision == "keep")
+        {
+            throw new InvalidOperationException($"拟定里没有这个符号：{memberPath}（keep 需要该符号有拟定；没有拟定就用 drop 接受现状）。");
+        }
+
+        SelectPermit? permit = PermitStore.TakeSelect(projectPath, symbolKey, selectCookie);
         if (permit == null)
         {
             throw new InvalidOperationException(
-                "选择 cookie 无效（可能已被用掉、或已被新的查看替换）：重新 get_member 拿新的。");
+                "选择 cookie 无效（可能已被用掉、或已被新的查看替换）：重新查看符号（symbols）拿新的。");
         }
 
         string description;
-        switch (choice.Trim().ToLowerInvariant())
+        if (decision == "drop")
         {
-            case "draft":
-                store.ReplaceSymbol(projectPath, edit.TypePath, edit.MemberName, edit.RequestedContent, edit.SymbolKey, permit.Disk, "replaced", keepFirstSnapshot: false);
-                description = "用拟定内容（坚持本次写法）";
-                break;
-            case "snapshot":
-                store.ReplaceSymbol(projectPath, edit.TypePath, edit.MemberName, permit.Snapshot, edit.SymbolKey, permit.Disk, "replaced", keepFirstSnapshot: false);
-                description = "用快照内容（回到编辑前）";
-                break;
-            case "disk":
-                store.ReplaceSymbol(projectPath, edit.TypePath, edit.MemberName, permit.Disk, edit.SymbolKey, permit.Disk, "replaced", keepFirstSnapshot: false);
-                description = "用现状内容（这个符号等于不改）";
-                break;
-            case "drop":
+            if (edit != null)
+            {
                 store.RemoveSymbol(projectPath, edit.SymbolKey);
-                description = "取消拟定（不再改这个符号）";
-                break;
-            default:
-                throw new ArgumentException("choice 只能是 draft / snapshot / disk / drop。");
+            }
+
+            description = "移除拟定（放弃本次写法、接受现状）";
+        }
+        else
+        {
+            description = "保持拟定（坚持本次写法）";
         }
 
+        // 解决过的冲突：把这个符号的 hash 更新为现在的 hash
+        ConflictService.AcceptCurrent(projectPath, symbolKey);
         PermitStore.Invalidate(projectPath);
         return $"# 选择已应用{Environment.NewLine}"
-            + $"- 符号：{edit.SymbolKey}{Environment.NewLine}"
+            + $"- 符号：{symbolKey}{Environment.NewLine}"
             + $"- 选择：{description}{Environment.NewLine}"
-            + $"- 落盘许可已作废：要落盘请重新 confirm_draft（不带 cookie）做预检。";
+            + $"- 该符号的追踪 hash 已更新为现在的 hash（冲突解除）{Environment.NewLine}"
+            + $"- 落盘许可已作废：要落盘请重新 confirm_draft（不带 applyCookie）做预检。";
     }
 
     /// <summary>
@@ -372,14 +389,21 @@ public static class DraftService
     }
 
     /// <summary>
-    /// 拟定确认（第三节 5）：
-    /// **不带 cookie** = 重建符号树 → 现场定位文件 → 预检（占用/冲突/字节）→ 通过就发**内存** applyCookie 并记许可快照；
-    /// **带 cookie** = 校验 cookie 与「路径 + 文件字节」→ 现场生成整文件新文本 → 落盘事务。
+    /// 拟定确认：
+    /// **不带 applyCookie** = 重建符号树 → 现场定位文件 → 预检（占用 / 符号冲突 / 字节）→ 无未解决冲突才发**内存** applyCookie 并记许可快照；
+    /// **带 applyCookie** = 校验 cookie 与「路径 + 文件字节」→ 现场生成整文件新文本 → 落盘事务。
+    /// 参数是 `track_project` 拿到的**追踪 cookie**（不再要 csprojPath）。
     /// </summary>
-    public static string Confirm(string csprojPath, string applyCookie, bool apply)
+    public static string Confirm(string cookie, string applyCookie, bool apply)
     {
-        string projectPath = ProjectViewer.ResolveProjectFile(csprojPath);
         DraftStore store = new();
+        string projectPath = RequireProjectByCookie(store, cookie, "confirm_draft");
+        return ConfirmProject(store, projectPath, applyCookie, apply);
+    }
+
+    /// <summary>按已解析的项目路径确认拟定（工具层只给 cookie；这里保留路径入参给内部复用与测试）。</summary>
+    internal static string ConfirmProject(DraftStore store, string projectPath, string applyCookie, bool apply)
+    {
         DraftRecord? record = store.Find(projectPath);
         if (record == null || record.Edits.Count == 0)
         {
@@ -389,21 +413,21 @@ public static class DraftService
         LoadedProject project = LoadedProject.Load(projectPath);
         DraftPlanner.Plan plan = DraftPlanner.Compute(project, record.Edits);
         DiagnosticSnapshot before = Analyze(project.Compilation);
-        // 诊断对比必须基于**现场算出来的**拟定结果：拟定里不再存 file_path / result_content，
-        // 旧的 Replay 拿到的是空串，会让"新增/消失"永远为空
+        // 诊断对比必须基于**现场算出来的**拟定结果
         DiagnosticSnapshot after = Analyze(plan.Projected);
 
         bool cookieGiven = !string.IsNullOrWhiteSpace(applyCookie);
         if (!apply || !cookieGiven)
         {
-            return Precheck(projectPath, project, record, plan, before, after);
+            return Precheck(store, projectPath, project, record, plan, before, after);
         }
 
-        return ApplyWithPermit(projectPath, store, record, plan, applyCookie, before, after);
+        return ApplyWithPermit(store, projectPath, record, plan, applyCookie, before, after);
     }
 
-    /// <summary>预检：报告「本次改动涉及」与问题；全部通过才发（内存）applyCookie。</summary>
+    /// <summary>预检：报告「本次改动涉及」与问题；**没有未解决冲突才发**（内存）applyCookie。</summary>
     private static string Precheck(
+        DraftStore store,
         string projectPath,
         LoadedProject project,
         DraftRecord record,
@@ -418,38 +442,33 @@ public static class DraftService
         List<string> notices = [];
         foreach (string missing in plan.Missing)
         {
-            problems.Add($"⛔ 定位不到符号：{missing} —— 可能被改名/删除；用 get_member 看三方内容或重新 stage");
+            problems.Add($"⛔ 定位不到符号：{missing} —— 可能被改名/删除；查看符号确认，或重新 stage_draft 重新拟定");
         }
 
-        // 符号级冲突：当前声明文本 ≠ 拟定快照（也就是"拟定期间被非工具改动"）
-        Dictionary<string, string> currentBaseline = SymbolBaseline.Capture(project.Compilation);
-        foreach (DraftEdit edit in record.Edits)
+        // 未解决冲突 = 追踪里保存的符号 hash 与当前源码不对齐（新增的、没有拟定的符号也算）
+        TrackingRecord? tracking = store.GetTracking(projectPath);
+        IReadOnlyDictionary<string, string> currentBaseline = SymbolBaseline.Capture(project.Compilation);
+        if (tracking == null)
         {
-            if (edit.SymbolKey.Length == 0)
+            problems.Add("⛔ 这个项目已经不在追踪里：请重新 track_project 拿新的 cookie。");
+        }
+        else
+        {
+            IReadOnlyList<SymbolConflict> conflicts = ConflictService.Unresolved(tracking.Baseline, currentBaseline, record.Edits);
+            if (conflicts.Count > 0)
             {
-                continue;
-            }
-
-            if (edit.SymbolSnapshot.Length == 0)
-            {
-                // 拟定开始时这个符号不存在（新建类型 / 新增成员）→ 现在存在了就是被外部抢先创建
-                if (currentBaseline.ContainsKey(edit.SymbolKey))
+                problems.Add($"⛔ 还有 {conflicts.Count} 个未解决的冲突（没有未解决冲突才发落盘 cookie）：");
+                foreach (SymbolConflict conflict in conflicts.Take(50))
                 {
-                    problems.Add($"⛔ 新建目标已被外部创建：{edit.SymbolKey} —— 按冲突处理，请重新编辑");
+                    problems.Add($"  - {conflict.Describe()}");
                 }
 
-                continue;
-            }
+                if (conflicts.Count > 50)
+                {
+                    problems.Add($"  - …（还有 {conflicts.Count - 50} 个）");
+                }
 
-            if (!currentBaseline.TryGetValue(edit.SymbolKey, out string? currentHash))
-            {
-                problems.Add($"⛔ 符号已消失：{edit.SymbolKey}（可能被改名/移动）");
-                continue;
-            }
-
-            if (!string.Equals(currentHash, SymbolBaseline.HashText(edit.SymbolSnapshot), StringComparison.Ordinal))
-            {
-                problems.Add($"⚠ 冲突：{edit.SymbolKey} —— 拟定期间被非工具改动（用 get_member 看三方，或 select_draft 解决）");
+                problems.Add("  解决路径：查看符号（拿 selectCookie）→ select_draft（keep 保持拟定 / drop 移除拟定）→ 或重新 stage_draft 重新拟定。");
             }
         }
 
@@ -529,8 +548,8 @@ public static class DraftService
 
     /// <summary>带 cookie 落盘：判定顺序写死（无许可 → cookie 不符 → 逐项比对），通过才写。</summary>
     private static string ApplyWithPermit(
-        string projectPath,
         DraftStore store,
+        string projectPath,
         DraftRecord record,
         DraftPlanner.Plan plan,
         string applyCookie,
@@ -674,7 +693,6 @@ public static class DraftService
             ? "- format 额外改动：无"
             : $"- format 额外改动：{string.Join("、", reformatted)}（hash 变化）");
         builder.AppendLine("- 追踪继续，基线已按落盘后的现状整体重算。");
-        builder.AppendLine("- 未做任何 git 操作（提交/分支/贮藏都不动）");
         return builder.ToString();
     }
 
@@ -738,35 +756,6 @@ public static class DraftService
         builder.AppendLine("## 诊断对比（按 错误码 + 消息 + 文件 配对，行号只用于展示）");
         AppendDiagnostics(builder, "新增", after, before);
         AppendDiagnostics(builder, "消失", before, after);
-    }
-
-    /// <summary>把拟定里算好的内容重放进编译对象（每个文件只取最后一条结果）。</summary>
-    internal static CSharpCompilation Replay(CSharpCompilation compilation, IReadOnlyList<DraftEdit> edits)
-    {
-        // 新增文件的语法树必须与既有树**同一个语言版本**，否则 CSharpCompilation.AddSyntaxTrees 会抛
-        // ArgumentException("不一致的语言版本") —— 所以基准解析选项取自 compilation 里已有的树，
-        // 不能写死 Preview。
-        CSharpParseOptions baseline = compilation.SyntaxTrees
-            .OfType<CSharpSyntaxTree>()
-            .Select(tree => tree.Options)
-            .FirstOrDefault()
-            ?? new CSharpParseOptions(LanguageVersion.Preview);
-
-        CSharpCompilation result = compilation;
-        foreach (string file in edits.Select(edit => edit.FilePath).Distinct(StringComparer.OrdinalIgnoreCase))
-        {
-            DraftEdit last = edits.Last(edit => edit.FilePath.Equals(file, StringComparison.OrdinalIgnoreCase));
-            SyntaxTree? existing = result.SyntaxTrees.FirstOrDefault(tree => tree.FilePath.Equals(file, StringComparison.OrdinalIgnoreCase));
-            CSharpParseOptions options = existing is CSharpSyntaxTree csharp
-                ? csharp.Options
-                : baseline;
-            SyntaxTree replacement = CSharpSyntaxTree.ParseText(last.ResultContent, options, path: file);
-            result = existing == null
-                ? result.AddSyntaxTrees(replacement)
-                : result.ReplaceSyntaxTree(existing, replacement);
-        }
-
-        return result;
     }
 
     /// <summary>把一条拟定算成若干次文件改动（改成员 / 删成员 / 新增成员 / 新建类型都可能牵扯多个文件）。</summary>

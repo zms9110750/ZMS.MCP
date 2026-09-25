@@ -4,8 +4,8 @@ using ZMS.MCP.Csharp.Storage;
 namespace ZMS.MCP.Csharp.Draft;
 
 /// <summary>
-/// 拟定里的一条编辑。存的是**意图**（要改哪个类型/成员、内容是什么）和**算好的结果内容**，
-/// 以及该文件在拟定开始时的基线 hash（落盘前用来发现"被别人改过"）。
+/// 拟定里的一条编辑：**符号 + 意图 + 首次编辑时该符号的文本**。
+/// 不存文件路径、不存整文件内容、更不存文件快照 —— 路径与整文件新文本都在预检/落盘现场算。
 /// </summary>
 public sealed record DraftEdit(
     long Id,
@@ -13,9 +13,6 @@ public sealed record DraftEdit(
     string TypePath,
     string MemberName,
     string? RequestedContent,
-    string FilePath,
-    string BaselineHash,
-    string ResultContent,
     string Action,
     string SymbolKey = "",
     string SymbolSnapshot = "")
@@ -77,9 +74,6 @@ public sealed class DraftStore
         string typePath,
         string memberName,
         string? requestedContent,
-        string filePath,
-        string baselineHash,
-        string resultContent,
         string action,
         string symbolKey = "",
         string symbolSnapshot = "")
@@ -101,8 +95,7 @@ public sealed class DraftStore
         command.Parameters.AddWithValue("$snapshot", symbolSnapshot);
         long id = Convert.ToInt64(command.ExecuteScalar());
 
-        // filePath / baselineHash / resultContent 是旧列时代的形参：值已不再落库（这三个列也已删掉），字段恒空
-        return new DraftEdit(id, sequence, typePath, memberName, requestedContent, "", "", "", action, symbolKey, symbolSnapshot);
+        return new DraftEdit(id, sequence, typePath, memberName, requestedContent, action, symbolKey, symbolSnapshot);
     }
 
     /// <summary>
@@ -170,7 +163,7 @@ public sealed class DraftStore
             long id = Convert.ToInt64(insert.ExecuteScalar());
 
             transaction.Commit();
-            return new DraftEdit(id, sequence, typePath, memberName, requestedContent, "", "", "", action, symbolKey, snapshot);
+            return new DraftEdit(id, sequence, typePath, memberName, requestedContent, action, symbolKey, snapshot);
         }
     }
 
@@ -241,6 +234,36 @@ public sealed class DraftStore
         command.CommandText =
             "SELECT project_path, tracking_cookie, symbol_baseline, created_at FROM trackings WHERE project_path = $project;";
         command.Parameters.AddWithValue("$project", Normalize(projectPath));
+        using SqliteDataReader reader = command.ExecuteReader();
+        if (!reader.Read())
+        {
+            return null;
+        }
+
+        return new TrackingRecord(
+            reader.GetString(0),
+            reader.GetString(1),
+            SymbolBaseline.Deserialize(reader.GetString(2)),
+            reader.GetString(3));
+    }
+
+    /// <summary>
+    /// 按追踪 cookie 反查项目（`stage_draft` / `confirm_draft` 只拿 cookie，不拿 csprojPath）。
+    /// cookie 对不上任何项目时返回 null。
+    /// </summary>
+    public TrackingRecord? GetTrackingByCookie(string cookie)
+    {
+        string trimmed = (cookie ?? "").Trim();
+        if (trimmed.Length == 0)
+        {
+            return null;
+        }
+
+        using SqliteConnection connection = Open();
+        using SqliteCommand command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT project_path, tracking_cookie, symbol_baseline, created_at FROM trackings WHERE tracking_cookie = $cookie;";
+        command.Parameters.AddWithValue("$cookie", trimmed);
         using SqliteDataReader reader = command.ExecuteReader();
         if (!reader.Read())
         {
@@ -596,9 +619,6 @@ public sealed class DraftStore
                     editReader.GetString(2),
                     editReader.GetString(3),
                     editReader.IsDBNull(4) ? null : editReader.GetString(4),
-                    "",
-                    "",
-                    "",
                     editReader.GetString(5),
                     editReader.IsDBNull(6) ? "" : editReader.GetString(6),
                     editReader.IsDBNull(7) ? "" : editReader.GetString(7)));

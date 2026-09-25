@@ -5,12 +5,8 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Formatting;
 using Microsoft.CodeAnalysis.Host;
-using ZMS.MCP.Csharp.Project;
 
 namespace ZMS.MCP.Csharp.Roslyn;
-
-/// <summary>一次已落盘的写操作：改动的文件与行号范围。</summary>
-public sealed record EditResult(string FilePath, int StartLine, int EndLine, string Action);
 
 /// <summary>
 /// 一次**算好但还没写**的代码改动。拟定靠它累积：先算内容，确认之后才落盘。
@@ -157,33 +153,6 @@ public static class CodeEditor
             ?? throw new InvalidOperationException("Failed to remove the node.");
         updated = FormatIfNeeded(updated, format);
         return Compute(node.SyntaxTree.FilePath, updated, "removed", (span.StartLinePosition.Line + 1, span.EndLinePosition.Line + 1));
-    }
-
-    /// <summary>
-    /// 落盘。写回走「写文件通则」：用**文件原编码**、写临时文件后原子替换。
-    /// </summary>
-    public static EditResult Apply(CodeChange change)
-    {
-        FileWriter.WriteAtomic(change.FilePath, change.NewContent);
-        return new EditResult(change.FilePath, change.StartLine, change.EndLine, change.Action);
-    }
-
-    /// <summary>整段替换一个成员声明。</summary>
-    public static EditResult ReplaceMember(ISymbol symbol, string newCode, bool format)
-    {
-        return Apply(ComputeReplace(symbol, newCode, format));
-    }
-
-    /// <summary>在类型里新增成员，可用 <paramref name="before"/> 指定插到某个已有成员之前。</summary>
-    public static EditResult AddMember(INamedTypeSymbol type, string code, string before, bool format)
-    {
-        return Apply(ComputeAdd(type, code, before, format));
-    }
-
-    /// <summary>删除一个成员声明。</summary>
-    public static EditResult RemoveMember(ISymbol symbol, bool format)
-    {
-        return Apply(ComputeRemove(symbol, format));
     }
 
     /// <summary>成员声明节点对应的源码文本（不带行号，方便直接复制修改）。</summary>
@@ -387,27 +356,47 @@ public static class CodeEditor
         return type.GetMembers().Count(member => !member.IsImplicitlyDeclared && !IsAccessor(member));
     }
 
+    /// <summary>
+    /// 属性的结构签名：**属性本身的修饰符全部显示**（访问权限 / static / abstract / virtual / override / readonly / ref），
+    /// 访问器只**隐藏实现**（没有精确匹配到该访问器时），访问器自己的访问权限 / readonly 也同样显示。
+    /// </summary>
     private static string PropertySignature(IPropertySymbol property, SyntaxNode? node)
     {
-        List<string> head = [AccessibilityText(property.DeclaredAccessibility)];
-        if (property.IsStatic)
+        List<string> head = [.. DeclarationModifiers(node)];
+        if (head.Count == 0)
         {
-            head.Add("static");
+            // 拿不到源码声明（分部声明里没写访问器表等）→ 用符号信息兼容
+            head.Add(AccessibilityText(property.DeclaredAccessibility));
+            if (property.IsStatic)
+            {
+                head.Add("static");
+            }
+
+            if (property.IsAbstract)
+            {
+                head.Add("abstract");
+            }
+
+            if (property.IsVirtual)
+            {
+                head.Add("virtual");
+            }
+
+            if (property.IsOverride)
+            {
+                head.Add("override");
+            }
+
+            if (property.IsReadOnly)
+            {
+                head.Add("readonly");
+            }
         }
 
-        if (property.IsAbstract)
+        string refText = RefText(property.RefKind);
+        if (refText.Length > 0)
         {
-            head.Add("abstract");
-        }
-
-        if (property.IsVirtual)
-        {
-            head.Add("virtual");
-        }
-
-        if (property.IsOverride)
-        {
-            head.Add("override");
+            head.Add(refText);
         }
 
         head.Add(property.Type.ToDisplayString(StructureFormat));
@@ -437,13 +426,16 @@ public static class CodeEditor
         return hasSemicolon ? text + ";" : text;
     }
 
-    /// <summary>访问器记号：自动访问器写 <c>get;</c>，**带实现**的写 <c>get { … }</c>（不展开实现）。</summary>
+    /// <summary>
+    /// 访问器记号：自动访问器写 <c>get;</c>，**带实现**的写 <c>get { … }</c>（只隐藏实现）；
+    /// 访问器自己的访问权限（<c>private set</c>）与 <c>readonly</c> 都照写。
+    /// </summary>
     private static string AccessorsText(IPropertySymbol property, SyntaxNode? node)
     {
         AccessorListSyntax? list = node switch
         {
-            PropertyDeclarationSyntax declaration => declaration.AccessorList,
-            IndexerDeclarationSyntax declaration => declaration.AccessorList,
+            PropertyDeclarationSyntax propertyDeclaration => propertyDeclaration.AccessorList,
+            IndexerDeclarationSyntax indexerDeclaration => indexerDeclaration.AccessorList,
             _ => null,
         };
 
@@ -452,8 +444,7 @@ public static class CodeEditor
         {
             foreach (AccessorDeclarationSyntax accessor in list.Accessors)
             {
-                bool hasBody = accessor.Body != null || accessor.ExpressionBody != null;
-                parts.Add(hasBody ? $"{accessor.Keyword.Text} {{ … }}" : accessor.Keyword.Text + ";");
+                parts.Add(AccessorSignature(accessor));
             }
         }
 
@@ -471,6 +462,37 @@ public static class CodeEditor
         }
 
         return "{ " + string.Join(' ', parts) + " }";
+    }
+
+    /// <summary>一个访问器的记号：修饰符（访问权限 / readonly 等）+ 关键字，实现只给 <c>{ … }</c>。</summary>
+    private static string AccessorSignature(AccessorDeclarationSyntax accessor)
+    {
+        List<string> parts = [.. accessor.Modifiers.Select(modifier => modifier.Text)];
+        bool hasBody = accessor.Body != null || accessor.ExpressionBody != null;
+        parts.Add(hasBody ? $"{accessor.Keyword.Text} {{ … }}" : accessor.Keyword.Text + ";");
+        return string.Join(' ', parts);
+    }
+
+    /// <summary>声明上的修饰符（照抄源码顺序）；没有源码声明时返回空表。</summary>
+    private static IReadOnlyList<string> DeclarationModifiers(SyntaxNode? node)
+    {
+        return node switch
+        {
+            PropertyDeclarationSyntax property => [.. property.Modifiers.Select(modifier => modifier.Text)],
+            IndexerDeclarationSyntax indexer => [.. indexer.Modifiers.Select(modifier => modifier.Text)],
+            _ => [],
+        };
+    }
+
+    /// <summary><c>ref</c> / <c>ref readonly</c> 的前缀（没有就返回空串）。</summary>
+    private static string RefText(RefKind kind)
+    {
+        return kind switch
+        {
+            RefKind.Ref => "ref",
+            RefKind.RefReadOnly or RefKind.RefReadOnlyParameter => "ref readonly",
+            _ => "",
+        };
     }
 
     private static string FieldSignature(IFieldSymbol field, SyntaxNode? node)

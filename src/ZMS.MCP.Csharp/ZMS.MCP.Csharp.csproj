@@ -13,6 +13,8 @@
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.12" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.9.0" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.9.0" />
+    <!-- 版本范围解析走 NuGet 官方实现（VersionRange），不再自造解析 -->
+    <PackageReference Include="NuGet.Versioning" Version="6.13.2" />
     <!-- 拟定状态要落在 sqlite 里（放在 MCP 自己的目录，不进项目） -->
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
   </ItemGroup>

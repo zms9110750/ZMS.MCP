@@ -118,6 +118,154 @@ public sealed class NuGetLayerTests
         Assert.Throws<ArgumentException>(() => VersionRange.Parse("[1.0.0,2.0.0"));
     }
 
+    // ───────── verRange：范围解析 + 所有符合的版本（list_package_versions） ─────────
+
+    [Fact]
+    public void VersionRangeFilter_star_is_all_release_versions_only()
+    {
+        VersionRangeFilter star = VersionRangeFilter.Parse("*");
+
+        Assert.False(star.IncludePrerelease);
+        Assert.True(star.Contains(ComparableVersion.Parse("13.0.3")));
+        Assert.True(star.Contains(ComparableVersion.Parse("0.0.1")));
+        // 预览版不在「所有正式版」里
+        Assert.False(star.Contains(ComparableVersion.Parse("13.1.0-beta.1")));
+        // 等价于 [0.0.0,9999.9999.9999]
+        Assert.Contains("9999.9999.9999", star.Description, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void VersionRangeFilter_empty_lists_release_versions_only()
+    {
+        VersionRangeFilter empty = VersionRangeFilter.Parse("");
+
+        Assert.False(empty.IncludePrerelease);
+        Assert.True(empty.Contains(ComparableVersion.Parse("1.0.0")));
+        Assert.False(empty.Contains(ComparableVersion.Parse("1.0.0-beta")));
+    }
+
+    [Fact]
+    public void VersionRangeFilter_star_dash_star_includes_prerelease()
+    {
+        VersionRangeFilter all = VersionRangeFilter.Parse("*-*");
+
+        Assert.True(all.IncludePrerelease);
+        Assert.True(all.Contains(ComparableVersion.Parse("13.1.0-beta.1")));
+        Assert.True(all.Contains(ComparableVersion.Parse("13.0.3")));
+    }
+
+    [Fact]
+    public void VersionRangeFilter_parses_a_range_and_keeps_every_matching_version()
+    {
+        VersionRangeFilter range = VersionRangeFilter.Parse("[13.0,14.0)");
+
+        Assert.True(range.Contains(ComparableVersion.Parse("13.0.0")));
+        Assert.True(range.Contains(ComparableVersion.Parse("13.9.9")));
+        Assert.False(range.Contains(ComparableVersion.Parse("14.0.0")));
+        Assert.False(range.Contains(ComparableVersion.Parse("12.9.9")));
+        // 范围两端没写预览版 → 预览版不列
+        Assert.False(range.Contains(ComparableVersion.Parse("13.1.0-beta")));
+    }
+
+    [Fact]
+    public void VersionRangeFilter_honours_explicit_prerelease_bounds()
+    {
+        VersionRangeFilter range = VersionRangeFilter.Parse("[1.0.0-alpha,1.0.0]");
+
+        Assert.True(range.IncludePrerelease);
+        Assert.True(range.Contains(ComparableVersion.Parse("1.0.0-beta")));
+        Assert.True(range.Contains(ComparableVersion.Parse("1.0.0")));
+    }
+
+    [Fact]
+    public void VersionRangeFilter_narrows_a_floating_range_to_its_prefix()
+    {
+        // NuGet 的 Satisfies 只看边界，1.3.0 也会落在 1.2.* —— 前缀必须自己收紧
+        VersionRangeFilter floating = VersionRangeFilter.Parse("1.2.*");
+
+        Assert.True(floating.Contains(ComparableVersion.Parse("1.2.0")));
+        Assert.True(floating.Contains(ComparableVersion.Parse("1.2.9")));
+        Assert.False(floating.Contains(ComparableVersion.Parse("1.3.0")));
+        Assert.False(floating.Contains(ComparableVersion.Parse("13.0.0")));
+    }
+
+    [Fact]
+    public void VersionRangeFilter_rejects_malformed_ranges()
+    {
+        Assert.Throws<ArgumentException>(() => VersionRangeFilter.Parse("[1.0.0,2.0.0"));
+    }
+
+    // ───────── 移除包：切图算出会一并消失的传递包 ─────────
+
+    [Fact]
+    public void ComputeDisappearingPackages_cuts_the_removed_root_and_compares_with_the_old_graph()
+    {
+        List<PackageNode> known =
+        [
+            new("A", "1.0.0"),
+            new("B", "1.0.0"),
+            new("C", "1.0.0"),
+            new("D", "1.0.0"),
+        ];
+        Dictionary<string, string[]> dependencies = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["A"] = ["B"],
+            ["B"] = ["C"],
+        };
+
+        IReadOnlyList<string> disappeared = PackageManager.ComputeDisappearingPackages(
+            [new PackageNode("D", "1.0.0")],
+            known,
+            ["A"],
+            (id, version) => ReadFakeDependencies(dependencies, id));
+
+        // A 是被直接移除的（不列进「依赖传递包」），B、C 不再被需要 → 一并消失；D 保住
+        Assert.Equal(["B", "C"], disappeared);
+    }
+
+    [Fact]
+    public void ComputeDisappearingPackages_keeps_a_package_that_another_root_still_needs()
+    {
+        List<PackageNode> known =
+        [
+            new("A", "1.0.0"),
+            new("X", "1.0.0"),
+            new("Shared", "1.0.0"),
+        ];
+        Dictionary<string, string[]> dependencies = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["A"] = ["Shared"],
+            ["X"] = ["Shared"],
+        };
+
+        IReadOnlyList<string> disappeared = PackageManager.ComputeDisappearingPackages(
+            [new PackageNode("X", "1.0.0")],
+            known,
+            ["A"],
+            (id, version) => ReadFakeDependencies(dependencies, id));
+
+        // Shared 还被 X 需要 → 不消失
+        Assert.Empty(disappeared);
+    }
+
+    private static IReadOnlyList<(string Id, string Range)> ReadFakeDependencies(
+        IReadOnlyDictionary<string, string[]> dependencies,
+        string id)
+    {
+        if (!dependencies.TryGetValue(id, out string[]? deps))
+        {
+            return [];
+        }
+
+        List<(string Id, string Range)> result = [];
+        foreach (string dep in deps)
+        {
+            result.Add((dep, ""));
+        }
+
+        return result;
+    }
+
     // ───────── 本地缓存 ─────────
 
     [Fact]

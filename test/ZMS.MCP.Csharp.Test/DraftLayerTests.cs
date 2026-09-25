@@ -36,7 +36,6 @@ public sealed class DraftLayerTests
         string root = NewTempDirectory();
         DraftStore store = new(Path.Combine(root, "drafts.db"));
         string project = Path.Combine(root, "Demo.csproj");
-        string file = Path.Combine(root, "A.cs");
 
         DraftRecord first = store.GetOrCreate(project);
         DraftRecord again = store.GetOrCreate(project);
@@ -45,16 +44,15 @@ public sealed class DraftLayerTests
         Assert.Equal(first.Cookit, again.Cookit);
         Assert.True(Guid.TryParse(first.Cookit, out _));
 
-        store.Append(project, "Demo.A", "Run", "void Run() { }", file, "hash_original", "content1", "modified", "Demo.A.Run()", "snapshot1");
-        store.Append(project, "Demo.A", "Stop", "void Stop() { }", file, "hash_original", "content2", "modified", "Demo.A.Stop()", "snapshot2");
+        store.Append(project, "Demo.A", "Run", "void Run() { }", "modified", "Demo.A.Run()", "snapshot1");
+        store.Append(project, "Demo.A", "Stop", "void Stop() { }", "modified", "Demo.A.Stop()", "snapshot2");
 
         DraftRecord? record = store.Find(project);
         Assert.NotNull(record);
         Assert.Equal([1, 2], record!.Edits.Select(edit => edit.Sequence));
-        // 拟定只记「符号 + 意图 + 首次快照」：file_path / baseline_hash / result_content 三个旧列已删掉，字段恒空
+        // 拟定只记「符号 + 意图 + 首次编辑时的符号文本」：没有文件路径、没有整文件内容、没有文件快照
         Assert.Equal("Demo.A.Stop()", record.Edits[1].SymbolKey);
         Assert.Equal("snapshot2", record.Edits[1].SymbolSnapshot);
-        Assert.All(record.Edits, edit => Assert.Equal("", edit.ResultContent));
         Assert.All(record.Edits, edit => Assert.False(edit.IsDelete));
     }
 
@@ -105,7 +103,7 @@ public sealed class DraftLayerTests
         Assert.Equal("track-cookie", saved.TrackingCookie);
         Assert.Equal("H1", store.GetTracking(project)!.Baseline["Demo.A"]);
 
-        store.Append(project, "Demo.A", "Run", "void Run() { }", Path.Combine(root, "A.cs"), "hash", "content", "added");
+        store.Append(project, "Demo.A", "Run", "void Run() { }", "added");
         Assert.NotNull(store.Find(project));
 
         // 取消追踪：追踪记录与拟定一起清掉
@@ -139,7 +137,7 @@ public sealed class DraftLayerTests
         DraftStore store = new(Path.Combine(root, "drafts.db"));
         string project = Path.Combine(root, "Demo.csproj");
 
-        store.Append(project, "Demo.A", "Run", null, Path.Combine(root, "A.cs"), "hash", "content", "removed");
+        store.Append(project, "Demo.A", "Run", null, "removed");
 
         DraftRecord? record = store.Find(project);
         Assert.True(record!.Edits[0].IsDelete);
@@ -153,10 +151,9 @@ public sealed class DraftLayerTests
         DraftStore store = new(Path.Combine(root, "drafts.db"));
         string firstProject = Path.Combine(root, "First.csproj");
         string secondProject = Path.Combine(root, "Second.csproj");
-        string file = Path.Combine(root, "A.cs");
 
-        store.Append(firstProject, "Demo.A", "Run", "void Run() { }", file, "h", "c", "modified");
-        store.Append(secondProject, "Demo.B", "Run", "void Run() { }", file, "h", "c", "modified");
+        store.Append(firstProject, "Demo.A", "Run", "void Run() { }", "modified");
+        store.Append(secondProject, "Demo.B", "Run", "void Run() { }", "modified");
 
         store.Clear(firstProject);
 
@@ -260,8 +257,8 @@ public sealed class DraftLayerTests
         Assert.Null(PermitStore.CheckApply(project, "wrong-cookie"));
 
         // 选择许可按 (项目, 符号) 隔离：不同符号互不影响
-        string selectA = PermitStore.GrantSelect(project, "Demo.A", "snap", "draft", "disk");
-        string selectB = PermitStore.GrantSelect(project, "Demo.B", "snap", "draft", "disk");
+        string selectA = PermitStore.GrantSelect(project, "Demo.A");
+        string selectB = PermitStore.GrantSelect(project, "Demo.B");
         Assert.NotNull(PermitStore.TakeSelect(project, "Demo.A", selectA));
         Assert.NotNull(PermitStore.TakeSelect(project, "Demo.B", selectB));
         Assert.Null(PermitStore.TakeSelect(project, "Demo.A", selectA));   // 取过即用掉
@@ -295,7 +292,7 @@ public sealed class DraftLayerTests
 
     private static DraftEdit Edit(string action)
     {
-        return new DraftEdit(1, 1, "Demo.A", "Run", "void Run() { }", "A.cs", "hash", "content", action);
+        return new DraftEdit(1, 1, "Demo.A", "Run", "void Run() { }", action);
     }
 
     // ───────── 追踪服务 ─────────
@@ -361,6 +358,96 @@ public sealed class DraftLayerTests
         Assert.Null(new DraftStore(database).GetTracking(project));
     }
 
+    // ───────── 冲突模型（基线 hash vs 现状 hash） ─────────
+
+    [Fact]
+    public void ConflictService_reports_changed_added_and_removed_as_unresolved()
+    {
+        Dictionary<string, string> baseline = new(StringComparer.Ordinal)
+        {
+            ["Demo.A"] = "H1",
+            ["Demo.A.Run()"] = "H2",
+            ["Demo.Gone"] = "H3",
+        };
+        Dictionary<string, string> current = new(StringComparer.Ordinal)
+        {
+            ["Demo.A"] = "H1-CHANGED",
+            ["Demo.A.Run()"] = "H2",
+            ["Demo.New"] = "H4",
+        };
+        DraftEdit drafted = new(1, 1, "Demo.New", "", "class New { }", "新建类型", "Demo.New", "");
+
+        IReadOnlyList<SymbolConflict> conflicts = ConflictService.Unresolved(baseline, current, [drafted]);
+
+        Assert.Contains(conflicts, item => item.SymbolKey == "Demo.A" && item.Kind == ConflictKind.Changed);
+        // 新增的、没有拟定的符号也算冲突
+        Assert.Contains(conflicts, item => item.SymbolKey == "Demo.New" && item.Kind == ConflictKind.Added && item.HasDraft);
+        Assert.Contains(conflicts, item => item.SymbolKey == "Demo.Gone" && item.Kind == ConflictKind.Removed);
+        Assert.DoesNotContain(conflicts, item => item.SymbolKey == "Demo.A.Run()");
+    }
+
+    [Fact]
+    public void ConflictService_IsUnresolved_needs_both_sides_aligned()
+    {
+        Dictionary<string, string> baseline = new(StringComparer.Ordinal) { ["Demo.A"] = "H1" };
+
+        Assert.False(ConflictService.IsUnresolved(baseline, new Dictionary<string, string> { ["Demo.A"] = "H1" }, "Demo.A"));
+        Assert.True(ConflictService.IsUnresolved(baseline, new Dictionary<string, string> { ["Demo.A"] = "H9" }, "Demo.A"));
+        // 基线里没有、现状里有 = 新增冲突
+        Assert.True(ConflictService.IsUnresolved(baseline, new Dictionary<string, string> { ["Demo.A"] = "H1", ["Demo.B"] = "H9" }, "Demo.B"));
+        // 基线里有、现状没有 = 消失冲突
+        Assert.True(ConflictService.IsUnresolved(baseline, new Dictionary<string, string>(), "Demo.A"));
+    }
+
+    [Fact]
+    public void ConflictService_IsRelated_covers_the_container_chain()
+    {
+        Assert.True(ConflictService.IsRelated("Demo.Class1.Add(int, int)", "Demo.Class1.Add(int, int)"));
+        // 成员与它所属的类型视为一体
+        Assert.True(ConflictService.IsRelated("Demo.Class1", "Demo.Class1.Add(int, int)"));
+        // 兄弟成员不受影响，名字前缀相似的类型也不受影响
+        Assert.False(ConflictService.IsRelated("Demo.Class1.Other()", "Demo.Class1.Add(int, int)"));
+        Assert.False(ConflictService.IsRelated("Demo.Class12", "Demo.Class1"));
+    }
+
+    [Fact]
+    public void ConflictService_AcceptCurrent_updates_that_hash_and_keeps_the_other_conflicts()
+    {
+        string root = NewTempDirectory();
+        DraftStore store = new(Path.Combine(root, "drafts.db"));
+        string project = Path.Combine(root, "Demo.csproj");
+        store.SaveTracking(project, "track-cookie", new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["Demo.A"] = "OLD-A",
+            ["Demo.B"] = "OLD-B",
+        });
+        Dictionary<string, string> current = new(StringComparer.Ordinal)
+        {
+            ["Demo.A"] = "NOW-A",
+            ["Demo.B"] = "NOW-B",
+        };
+
+        ConflictService.AcceptCurrent(project, "Demo.A", current, store.DatabasePath);
+
+        TrackingRecord after = store.GetTracking(project)!;
+        Assert.Equal("NOW-A", after.Baseline["Demo.A"]);   // 解决过的 → 更新为现在的 hash
+        Assert.Equal("OLD-B", after.Baseline["Demo.B"]);   // 别的冲突原样保留
+        Assert.Equal("track-cookie", after.TrackingCookie);
+    }
+
+    [Fact]
+    public void DraftStore_finds_a_tracking_record_by_its_cookie()
+    {
+        string root = NewTempDirectory();
+        DraftStore store = new(Path.Combine(root, "drafts.db"));
+        string project = Path.Combine(root, "Demo.csproj");
+        store.SaveTracking(project, "track-cookie", new Dictionary<string, string> { ["Demo.A"] = "H1" });
+
+        Assert.Equal(project, store.GetTrackingByCookie("track-cookie")!.ProjectPath);
+        Assert.Null(store.GetTrackingByCookie("nope"));
+        Assert.Null(store.GetTrackingByCookie(""));
+    }
+
     // ───────── 诊断配对 ─────────
 
     [Fact]
@@ -402,53 +489,6 @@ public sealed class DraftLayerTests
         Assert.Empty(snapshot.Errors);
     }
 
-    // ───────── 语法树重放 ─────────
-
-    [Fact]
-    public void Replay_keeps_the_language_version_of_the_existing_trees()
-    {
-        string root = NewTempDirectory();
-        string file = Path.Combine(root, "A.cs");
-        File.WriteAllText(file, "namespace Demo;\npublic class A { }\n");
-        // 故意用与 Preview 不同的语言版本：新增文件的树必须跟它一致，
-        // 否则 AddSyntaxTrees 会抛"不一致的语言版本"（曾经写死 Preview 就是这么炸的）
-        CSharpCompilation compilation = CSharpCompilation.Create(
-            "ReplayTest",
-            [CSharpSyntaxTree.ParseText(File.ReadAllText(file), new CSharpParseOptions(LanguageVersion.CSharp12), path: file)],
-            [MetadataReference.CreateFromFile(typeof(object).Assembly.Location)],
-            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
-        string added = Path.Combine(root, "B.cs");
-
-        DraftEdit created = new(1, 1, "Demo.B", "", null, added, "", "namespace Demo;\npublic class B { }\n", "新建类型");
-        CSharpCompilation replayed = DraftService.Replay(compilation, [created]);
-
-        Assert.Equal(2, replayed.SyntaxTrees.Count());
-        Assert.Contains(
-            "class B",
-            replayed.SyntaxTrees.First(tree => tree.FilePath == added).ToString(),
-            StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void Replay_replaces_the_edited_tree_and_adds_new_files()
-    {
-        string root = NewTempDirectory();
-        string file = Path.Combine(root, "A.cs");
-        File.WriteAllText(file, "namespace Demo;\npublic class A { }\n");
-        CSharpCompilation compilation = Compile(File.ReadAllText(file), file);
-        string added = Path.Combine(root, "B.cs");
-
-        DraftEdit edit = new(1, 1, "Demo.A", "", null, file, "", "namespace Demo;\npublic class A\n{\n    public void Run() { }\n}\n", "modified");
-        DraftEdit created = new(2, 2, "Demo.B", "", null, added, "", "namespace Demo;\npublic class B { }\n", "新建类型");
-
-        CSharpCompilation replayed = DraftService.Replay(compilation, [edit, created]);
-
-        Assert.Equal(2, replayed.SyntaxTrees.Count());
-        Assert.Contains("Run", replayed.SyntaxTrees.First(tree => tree.FilePath == file).ToString(), StringComparison.Ordinal);
-        Assert.NotNull(replayed.SyntaxTrees.FirstOrDefault(tree => tree.FilePath == added));
-    }
-
-    // ───────── 新增成员：补 partial 与加成员必须落在同一份内容上 ─────────
 
     [Fact]
     public void BuildChanges_merges_partial_and_added_member_into_one_change()
@@ -618,8 +658,12 @@ public sealed class DraftLayerTests
         string project = Path.Combine(root, "Demo.csproj");
         File.WriteAllText(project, "<Project Sdk=\"Microsoft.NET.Sdk\" />");
 
-        string report = DraftService.Confirm(project, "", apply: true);
+        // confirm_draft 只认追踪 cookie（不再要 csprojPath）
+        string report = DraftService.Confirm("no-such-cookie", "", apply: true);
+        Assert.Contains("track_project", report);
 
-        Assert.Contains("没有未完成的拟定", report);
+        DraftStore store = new(Path.Combine(root, "drafts.db"));
+        store.SaveTracking(project, "track-cookie", new Dictionary<string, string>());
+        Assert.Contains("没有未完成的拟定", DraftService.Confirm("track-cookie", "", apply: true));
     }
 }

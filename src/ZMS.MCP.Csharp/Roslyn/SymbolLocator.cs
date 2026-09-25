@@ -108,7 +108,7 @@ public static class SymbolLocator
     }
 
     /// <summary>
-    /// 解析 <c>命名空间.类型.成员(参数类型,...)</c>。
+    /// 解析 <c>命名空间.类型.成员(参数类型,...)</c>；末尾允许一个访问器关键字（<c>Prop.get</c> / <c>Event.add</c>）。
     /// 从右往左找「能被解析成类型的最长前缀」，其余部分作为成员说明。
     /// </summary>
     public static ResolvedPath Resolve(Compilation compilation, string path)
@@ -119,6 +119,17 @@ public static class SymbolLocator
         }
 
         string trimmed = path.Trim();
+
+        // 末尾可能是访问器关键字：先摘下来再按成员路径解析。
+        // 不先摘的话，宽容的 FindType 会把 "Demo.T.Prop.get" 切在 get 前面（MemberSpec 变成 "get"）。
+        string accessorSuffix = "";
+        int lastDot = trimmed.LastIndexOf('.');
+        if (lastDot > 0 && IsAccessorKeyword(trimmed[(lastDot + 1)..]))
+        {
+            accessorSuffix = trimmed[lastDot..];
+            trimmed = trimmed[..lastDot];
+        }
+
         INamedTypeSymbol? best = null;
         int bestIndex = -1;
         int index = -1;
@@ -140,14 +151,25 @@ public static class SymbolLocator
 
         if (best == null)
         {
-            throw new InvalidOperationException($"Type not found for path '{path}'. Use ListTypes to see available fully qualified names.");
+            throw new InvalidOperationException(
+                $"Type not found for path '{path}'. Pass an empty path to the symbol tool to see the available fully qualified names.");
         }
 
-        string memberSpec = bestIndex < 0 ? "" : trimmed[(bestIndex + 1)..];
+        string memberSpec = (bestIndex < 0 ? "" : trimmed[(bestIndex + 1)..]) + accessorSuffix;
         return new ResolvedPath(best, memberSpec);
     }
 
-    /// <summary>成员说明可以是 <c>Name</c> 或 <c>Name(参数类型,...)</c>（参数类型支持简名）。</summary>
+    /// <summary>是不是访问器关键字（<c>get</c> / <c>set</c> / <c>init</c> / <c>add</c> / <c>remove</c>）。</summary>
+    internal static bool IsAccessorKeyword(string text)
+    {
+        return text.Equals("get", StringComparison.OrdinalIgnoreCase)
+            || text.Equals("set", StringComparison.OrdinalIgnoreCase)
+            || text.Equals("init", StringComparison.OrdinalIgnoreCase)
+            || text.Equals("add", StringComparison.OrdinalIgnoreCase)
+            || text.Equals("remove", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>成员说明可以是 <c>Name</c> 或 <c>Name(参数类型,...)</c>（参数类型支持简名）；末尾可加 <c>.get</c> 这类访问器关键字。</summary>
     public static IReadOnlyList<ISymbol> FindMembers(INamedTypeSymbol type, string memberSpec)
     {
         if (string.IsNullOrWhiteSpace(memberSpec))
@@ -167,6 +189,15 @@ public static class SymbolLocator
             name = name[..bracket].Trim();
         }
 
+        // 精确匹配访问器：`Prop.get` / `Prop.set` / `Prop.init` / `Event.add` / `Event.remove`
+        string accessorKeyword = "";
+        int accessorDot = name.LastIndexOf('.');
+        if (accessorDot > 0 && IsAccessorKeyword(name[(accessorDot + 1)..]))
+        {
+            accessorKeyword = name[(accessorDot + 1)..].ToLowerInvariant();
+            name = name[..accessorDot].Trim();
+        }
+
         List<ISymbol> candidates = type.GetMembers(name)
             .Where(member => !member.IsImplicitlyDeclared)
             .ToList();
@@ -177,6 +208,21 @@ public static class SymbolLocator
                 .ToList();
         }
 
+        if (accessorKeyword.Length > 0)
+        {
+            List<ISymbol> accessors = [];
+            foreach (ISymbol candidate in candidates)
+            {
+                IMethodSymbol? accessor = AccessorOf(candidate, accessorKeyword);
+                if (accessor != null)
+                {
+                    accessors.Add(accessor);
+                }
+            }
+
+            return accessors;
+        }
+
         if (parameters == null)
         {
             return candidates;
@@ -185,6 +231,39 @@ public static class SymbolLocator
         return candidates
             .Where(member => member is IMethodSymbol method && MatchesParameters(method, parameters))
             .ToList();
+    }
+
+    /// <summary>把属性/事件的访问器拿出来（找不到返回 null）。</summary>
+    private static IMethodSymbol? AccessorOf(ISymbol symbol, string keyword)
+    {
+        switch (symbol)
+        {
+            case IPropertySymbol property:
+                switch (keyword)
+                {
+                    case "get":
+                        return property.GetMethod;
+                    case "set":
+                    case "init":
+                        return property.SetMethod;
+                    default:
+                        return null;
+                }
+
+            case IEventSymbol @event:
+                switch (keyword)
+                {
+                    case "add":
+                        return @event.AddMethod;
+                    case "remove":
+                        return @event.RemoveMethod;
+                    default:
+                        return null;
+                }
+
+            default:
+                return null;
+        }
     }
 
     /// <summary>解析成恰好一个成员，找不到或有歧义时报错。</summary>
@@ -198,7 +277,8 @@ public static class SymbolLocator
         IReadOnlyList<ISymbol> members = FindMembers(type, memberSpec);
         if (members.Count == 0)
         {
-            throw new InvalidOperationException($"Member '{memberSpec}' not found in '{type.ToDisplayString(QualifiedNameFormat)}'. Use ListMembers first.");
+            throw new InvalidOperationException(
+                $"Member '{memberSpec}' not found in '{type.ToDisplayString(QualifiedNameFormat)}'. Use the symbol tool with this type as the path to list its members.");
         }
 
         if (members.Count > 1)

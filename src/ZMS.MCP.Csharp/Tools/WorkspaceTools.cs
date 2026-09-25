@@ -120,7 +120,9 @@ public static class WorkspaceTools
     [McpServerTool(ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]
     [Description(
         "Remove NuGet packages through 'dotnet remove package' (console operation, NOT part of any draft/transaction). " +
-        "Builds the package graph before and after so the report can list which transitive packages disappeared too.")]
+        "The report always lists which transitive packages disappear as well: on a dry run those are computed from the local " +
+        "dependency graph (build the graph, cut the removed direct packages, compare with the graph before), and a real run re-checks " +
+        "the same list against the restore result afterwards.")]
     public static string RemovePackages(
         [Description("csproj path, or a unique project name")] string csprojPath,
         [Description("nugetName: package ids to remove")] string[] nugetName,

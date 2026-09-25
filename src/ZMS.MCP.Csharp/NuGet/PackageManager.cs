@@ -169,7 +169,10 @@ public static class PackageManager
         return builder.ToString();
     }
 
-    /// <summary>移除前建图 → 命令行移除 → 移除后再建图 → 报告差异。</summary>
+    /// <summary>
+    /// 移除：**先建图**（本地已有依赖图）→ 从图里切掉要移除的直接包、算出不再被需要的传递包 → 与移除前的图比对；
+    /// 真跑时再执行命令行并用还原后的图复核一次。
+    /// </summary>
     public static string Remove(string csprojPath, IReadOnlyList<string> packageNames, bool dryRun = false)
     {
         if (packageNames.Count == 0)
@@ -181,6 +184,9 @@ public static class PackageManager
         string workingDirectory = Path.GetDirectoryName(fullPath) ?? ".";
         PackageGraphResult before = PackageGraph.Build(fullPath);
 
+        // 预演也能算：本地依赖图切图（建图 → 切掉要移除的直接包 → 与移除前的图比对）
+        List<string> disappeared = [.. ComputeDisappearingByGraph(before, packageNames)];
+
         if (!dryRun)
         {
             foreach (string name in packageNames)
@@ -191,11 +197,19 @@ public static class PackageManager
                     throw new InvalidOperationException($"dotnet remove package {name} 失败（退出码 {result.ExitCode}）：\n{result.Output}");
                 }
             }
-        }
 
-        PackageGraphResult after = dryRun ? before : PackageGraph.Build(fullPath);
-        HashSet<string> beforeNames = [.. before.Direct.Select(node => node.Id), .. before.Transitive.Select(node => node.Id)];
-        HashSet<string> afterNames = [.. after.Direct.Select(node => node.Id), .. after.Transitive.Select(node => node.Id)];
+            // 真跑过之后用**还原结果**复核一遍：切图是推算，实际以还原为准
+            PackageGraphResult after = PackageGraph.Build(fullPath);
+            HashSet<string> beforeNames = [.. before.Direct.Select(node => node.Id), .. before.Transitive.Select(node => node.Id)];
+            HashSet<string> afterNames = [.. after.Direct.Select(node => node.Id), .. after.Transitive.Select(node => node.Id)];
+            HashSet<string> removedDirectly = new(packageNames, StringComparer.OrdinalIgnoreCase);
+            disappeared =
+            [
+                .. beforeNames
+                    .Where(name => !afterNames.Contains(name) && !removedDirectly.Contains(name))
+                    .OrderBy(name => name, StringComparer.OrdinalIgnoreCase),
+            ];
+        }
 
         StringBuilder builder = new();
         builder.AppendLine("# 本次移除包");
@@ -203,18 +217,80 @@ public static class PackageManager
         builder.AppendLine();
         builder.AppendLine("# 本次移除的依赖传递包");
         // 被直接移除的顶级包已经列在「本次移除包」里，不再重复出现在这里（间接移除就是间接移除）
-        HashSet<string> removedDirectly = new(packageNames, StringComparer.OrdinalIgnoreCase);
-        Append(builder, beforeNames
-            .Where(name => !afterNames.Contains(name) && !removedDirectly.Contains(name))
-            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase));
+        Append(builder, disappeared);
 
         if (dryRun)
         {
             builder.AppendLine();
-            builder.AppendLine("（预演，未真正执行；上面「依赖传递包」一栏按实际移除后的图算，预演时为 0。）");
+            builder.AppendLine("（预演：未执行任何命令；上面的「依赖传递包」由本地依赖图切图推出。）");
         }
 
         return builder.ToString();
+    }
+
+    /// <summary>按本地依赖图切图：保留「没被移除的直接包 + 项目引用带来的顶级包」，看哪些包再也到不了。</summary>
+    internal static IReadOnlyList<string> ComputeDisappearingByGraph(
+        PackageGraphResult before,
+        IReadOnlyList<string> removedNames)
+    {
+        List<PackageNode> retainedRoots =
+        [
+            .. before.Direct.Where(node => !removedNames.Contains(node.Id, StringComparer.OrdinalIgnoreCase)),
+        ];
+        retainedRoots.AddRange(before.FromProjectReferences);
+        List<PackageNode> known = [.. before.Direct, .. before.Transitive];
+        return ComputeDisappearingPackages(retainedRoots, known, removedNames, ReadNuspecDependencies);
+    }
+
+    /// <summary>
+    /// 切图的核心（纯函数，便于单测）：从保留的根出发按依赖闭包扩张，凡与「移除前的图」比对后不再可达、
+    /// 又不属于「本次直接移除」的包，就是会一并消失的传递包。
+    /// </summary>
+    /// <param name="retainedRoots">移除之后仍然保留的顶点（未被移除的直接包 + 项目引用带来的顶级包）。</param>
+    /// <param name="knownPackages">移除前的图里出现过的包（含版本；版本用来定位 nuspec）。</param>
+    /// <param name="removedNames">本次要移除的包名（它们本身不算「依赖传递包消失」）。</param>
+    /// <param name="readDependencies">读某个包的依赖（生产里读本地 nuspec；测试可注入假图）。</param>
+    internal static IReadOnlyList<string> ComputeDisappearingPackages(
+        IReadOnlyList<PackageNode> retainedRoots,
+        IReadOnlyList<PackageNode> knownPackages,
+        IReadOnlyList<string> removedNames,
+        Func<string, string, IReadOnlyList<(string Id, string Range)>> readDependencies)
+    {
+        Dictionary<string, string> known = new(StringComparer.OrdinalIgnoreCase);
+        foreach (PackageNode node in knownPackages)
+        {
+            known[node.Id] = node.Version;
+        }
+
+        HashSet<string> reachable = new(StringComparer.OrdinalIgnoreCase);
+        Queue<(string Id, string Version)> queue = new();
+        foreach (PackageNode root in retainedRoots)
+        {
+            // 保留的根自己当然还在
+            reachable.Add(root.Id);
+            queue.Enqueue((root.Id, root.Version));
+        }
+
+        while (queue.Count > 0)
+        {
+            (string id, string version) = queue.Dequeue();
+            foreach ((string dependencyId, string _) in readDependencies(id, version))
+            {
+                if (!reachable.Add(dependencyId))
+                {
+                    continue;
+                }
+
+                queue.Enqueue((dependencyId, known.TryGetValue(dependencyId, out string? found) ? found : ""));
+            }
+        }
+
+        return
+        [
+            .. known.Keys
+                .Where(id => !removedNames.Contains(id, StringComparer.OrdinalIgnoreCase) && !reachable.Contains(id))
+                .OrderBy(id => id, StringComparer.OrdinalIgnoreCase),
+        ];
     }
 
     /// <summary>选版本的结果：版本号 + 是否已知有漏洞 + 是否因为索引不可用而没核对过。</summary>
@@ -439,7 +515,7 @@ public static class PackageManager
     }
 
     /// <summary>读本地 nuspec 里的依赖；本地没有就返回空（宁可少算，也不瞎猜）。</summary>
-    private static IEnumerable<(string Id, string Range)> ReadDependencies(string packageName, string version)
+    internal static IEnumerable<(string Id, string Range)> ReadDependencies(string packageName, string version)
     {
         string? nuspecPath = NuGetCache.NuspecPath(packageName, version);
         if (nuspecPath == null)
@@ -467,6 +543,12 @@ public static class PackageManager
 
             yield return (id, dependency.Attribute("version")?.Value ?? "");
         }
+    }
+
+    /// <summary>切图时要的依赖读取委托：包名 + 版本 → 该包的依赖列表。</summary>
+    internal static IReadOnlyList<(string Id, string Range)> ReadNuspecDependencies(string packageName, string version)
+    {
+        return [.. ReadDependencies(packageName, version)];
     }
 
     /// <summary>
@@ -517,8 +599,7 @@ public static class PackageManager
         ];
     }
 
-    private static void Append(StringBuilder builder, IEnumerable<string> lines)
-    {
+    private static void Append(StringBuilder builder, IEnumerable<string> lines)    {
         bool any = false;
         foreach (string line in lines)
         {

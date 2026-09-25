@@ -26,12 +26,14 @@ public static class TrackingService
             TrackingRecord created = store.SaveTracking(projectPath, Guid.NewGuid().ToString("D"), current);
             builder.AppendLine("# 追踪已开始");
             builder.AppendLine($"- 项目：{projectPath}");
-            builder.AppendLine($"- 追踪 cookie：`{created.TrackingCookie}`（要清除追踪与拟定，把它传回 track_project 的 cookie 参数）");
-            builder.AppendLine($"- 快照：{current.Count} 个符号");
+            builder.AppendLine($"- 追踪 cookie：`{created.TrackingCookie}`");
+            builder.AppendLine("  - 用途一：传给 stage_draft / confirm_draft 做拟定编写与落盘（这两个工具只认 cookie，不要 csprojPath）");
+            builder.AppendLine("  - 用途二：传回 track_project 的 cookie 参数，即可解除追踪（清掉追踪记录与全部拟定）");
+            builder.AppendLine($"- 已保存 {current.Count} 个符号的 hash（只存 hash，不存文件快照；追踪只回答「哪些符号变了」，不会把文件还原回去）");
             AppendDraftList(builder, draft);
             builder.AppendLine();
             builder.AppendLine("## 有这些未追踪更改");
-            builder.AppendLine("（无 —— 快照就是当前现状）");
+            builder.AppendLine("（无 —— 已保存的 hash 就是当前现状）");
             return builder.ToString();
         }
 

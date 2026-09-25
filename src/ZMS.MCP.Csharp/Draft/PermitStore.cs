@@ -3,8 +3,8 @@ namespace ZMS.MCP.Csharp.Draft;
 /// <summary>许可快照里的一项：符号 → 落盘现场算出来的文件路径 + 当时的文件字节 hash。</summary>
 public sealed record SymbolPermitSnapshot(string FilePath, string FileHash);
 
-/// <summary>选择许可：某个符号在"被查看时"的三方内容。</summary>
-public sealed record SelectPermit(string Cookie, string SymbolKey, string Snapshot, string Draft, string Disk);
+/// <summary>选择许可：某个符号在「被查看时」发的一次性令牌（只带符号身份，不再保存任何内容快照）。</summary>
+public sealed record SelectPermit(string Cookie, string SymbolKey);
 
 /// <summary>
 /// 落盘许可与选择许可：**只放内存，不持久化**（要立刻用；MCP 重启即全部失效）。
@@ -81,14 +81,14 @@ public static class PermitStore
         Invalidate(projectPath);
     }
 
-    /// <summary>为某个符号发选择许可（`get_member` 遇到冲突时），返回新 cookie。</summary>
-    public static string GrantSelect(string projectPath, string symbolKey, string snapshot, string draft, string disk)
+    /// <summary>为某个符号发选择许可（查看符号时遇到未解决冲突），返回新 cookie。</summary>
+    public static string GrantSelect(string projectPath, string symbolKey)
     {
         string key = SelectKey(projectPath, symbolKey);
         string cookie = Guid.NewGuid().ToString("D");
         lock (Gate)
         {
-            Selects[key] = new SelectPermit(cookie, symbolKey, snapshot, draft, disk);
+            Selects[key] = new SelectPermit(cookie, symbolKey);
         }
 
         return cookie;

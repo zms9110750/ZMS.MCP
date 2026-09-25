@@ -6,10 +6,12 @@ namespace ZMS.MCP.Csharp.Test;
 
 /// <summary>
 /// 新流程（追踪 → 编辑 → 预检 → 落盘）的端到端测试，跑在临时项目上。
-/// 见 `docs/Csharp-拟定流程v3.md`。
+/// 编辑一律先追踪：stage_draft / confirm_draft 只认 track_project 发出来的追踪 cookie。
 /// </summary>
 public sealed class DraftFlowTests
 {
+    private const string AddSymbolKey = "Demo.Class1.Add(int, int)";
+
     /// <summary>造一个最小项目（csproj + 一个带 Add 的类）。</summary>
     private static string NewProject(out string directory)
     {
@@ -25,10 +27,17 @@ public sealed class DraftFlowTests
         return project;
     }
 
+    /// <summary>从工具输出里取出第一个反引号里的 cookie。</summary>
     private static string TakeCookie(string text)
     {
         int start = text.IndexOf('`') + 1;
         return text.Substring(start, text.IndexOf('`', start) - start);
+    }
+
+    /// <summary>追踪并返回追踪 cookie。</summary>
+    private static string TrackAndTakeCookie(string project)
+    {
+        return TakeCookie(TrackingService.Track(project));
     }
 
     [Fact]
@@ -38,9 +47,31 @@ public sealed class DraftFlowTests
         try
         {
             InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
-                () => DraftService.Stage(project, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 1; }"));
+                () => DraftService.Stage("not-a-cookie", "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 1; }"));
 
             Assert.Contains("track_project", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("cookie", exception.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            new DraftStore().ClearTracking(project);
+        }
+    }
+
+    [Fact]
+    public void Track_reports_the_cookie_and_its_two_uses()
+    {
+        string project = NewProject(out _);
+        try
+        {
+            string started = TrackingService.Track(project);
+
+            Assert.Contains("追踪已开始", started);
+            Assert.Contains("stage_draft", started);
+            Assert.Contains("confirm_draft", started);
+            // 同一个 cookie 也用来解除追踪
+            Assert.Contains("track_project", started);
+            Assert.Contains("## 有这些未追踪更改", started);
         }
         finally
         {
@@ -55,21 +86,23 @@ public sealed class DraftFlowTests
         string source = Path.Combine(directory, "Class1.cs");
         try
         {
-            Assert.Contains("追踪已开始", TrackingService.Track(project));
+            string cookie = TrackAndTakeCookie(project);
 
-            string staged = DraftService.Stage(project, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 1; }");
+            string staged = DraftService.Stage(cookie, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 1; }");
             Assert.Contains("Demo.Class1.Add(int, int)", staged);
 
-            string precheck = DraftService.Confirm(project, "", apply: true);
+            string precheck = DraftService.Confirm(cookie, "", apply: true);
             Assert.Contains("落盘 cookie", precheck);
             Assert.Contains("Class1.cs", precheck);
 
-            string applied = DraftService.Confirm(project, TakeCookie(precheck), apply: true);
+            string applied = DraftService.Confirm(cookie, TakeCookie(precheck), apply: true);
 
             Assert.Contains("已落盘", applied);
+            // 落盘汇报不再提 git
+            Assert.DoesNotContain("git", applied, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("a + b + 1", File.ReadAllText(source));
             // 落盘后拟定清空
-            Assert.Contains("没有未完成的拟定", DraftService.Confirm(project, "", apply: true));
+            Assert.Contains("没有未完成的拟定", DraftService.Confirm(cookie, "", apply: true));
         }
         finally
         {
@@ -83,9 +116,9 @@ public sealed class DraftFlowTests
         string project = NewProject(out _);
         try
         {
-            TrackingService.Track(project);
-            DraftService.Stage(project, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 1; }");
-            DraftService.Stage(project, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 2; }");
+            string cookie = TrackAndTakeCookie(project);
+            DraftService.Stage(cookie, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 1; }");
+            DraftService.Stage(cookie, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 2; }");
 
             DraftRecord record = new DraftStore().Find(project)!;
 
@@ -99,23 +132,157 @@ public sealed class DraftFlowTests
     }
 
     [Fact]
-    public void Precheck_reports_a_conflict_when_the_symbol_was_edited_outside()
+    public void Precheck_reports_an_unresolved_conflict_when_the_symbol_was_edited_outside()
     {
         string project = NewProject(out string directory);
         string source = Path.Combine(directory, "Class1.cs");
         try
         {
-            TrackingService.Track(project);
-            DraftService.Stage(project, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 1; }");
+            string cookie = TrackAndTakeCookie(project);
+            DraftService.Stage(cookie, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 1; }");
 
             // 模拟别人手改同一个符号
             File.WriteAllText(source, "namespace Demo;\n\npublic class Class1\n{\n    public static int Add(int a, int b) { return a + b + 100; }\n}\n");
 
-            string precheck = DraftService.Confirm(project, "", apply: true);
+            string precheck = DraftService.Confirm(cookie, "", apply: true);
 
-            Assert.Contains("冲突", precheck);
+            Assert.Contains("未解决的冲突", precheck);
+            Assert.Contains(AddSymbolKey, precheck);
             Assert.Contains("预检查未通过", precheck);
             Assert.DoesNotContain("落盘 cookie：`", precheck);
+        }
+        finally
+        {
+            new DraftStore().ClearTracking(project);
+        }
+    }
+
+    [Fact]
+    public void Precheck_treats_a_symbol_added_outside_as_a_conflict_even_without_a_draft()
+    {
+        string project = NewProject(out string directory);
+        try
+        {
+            string cookie = TrackAndTakeCookie(project);
+            DraftService.Stage(cookie, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 1; }");
+
+            // 外部新增了一个符号：它没有拟定，但也算冲突
+            File.WriteAllText(
+                Path.Combine(directory, "Outside.cs"),
+                "namespace Demo;\n\npublic class CameFromOutside\n{\n    public void Run() { }\n}\n");
+
+            string precheck = DraftService.Confirm(cookie, "", apply: true);
+
+            Assert.Contains("未解决的冲突", precheck);
+            Assert.Contains("Demo.CameFromOutside", precheck);
+            Assert.Contains("新出现", precheck);
+            Assert.DoesNotContain("落盘 cookie：`", precheck);
+        }
+        finally
+        {
+            new DraftStore().ClearTracking(project);
+        }
+    }
+
+    [Fact]
+    public void Select_keep_resolves_the_conflict_and_updates_the_saved_hash()
+    {
+        string project = NewProject(out string directory);
+        string source = Path.Combine(directory, "Class1.cs");
+        try
+        {
+            string cookie = TrackAndTakeCookie(project);
+            DraftService.Stage(cookie, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 1; }");
+            File.WriteAllText(source, "namespace Demo;\n\npublic class Class1\n{\n    public static int Add(int a, int b) { return a + b + 100; }\n}\n");
+            Assert.DoesNotContain("落盘 cookie：`", DraftService.Confirm(cookie, "", apply: true));
+
+            // 保持拟定（坚持本次写法）：该符号的 hash 更新为现在的 hash → 冲突解除
+            string selectCookie = PermitStore.GrantSelect(project, AddSymbolKey);
+            Assert.Contains("保持拟定", DraftService.Select(project, AddSymbolKey, selectCookie, "keep"));
+
+            string precheck = DraftService.Confirm(cookie, "", apply: true);
+            Assert.Contains("落盘 cookie", precheck);
+
+            // 落盘后文件里是拟定内容
+            Assert.Contains("已落盘", DraftService.Confirm(cookie, TakeCookie(precheck), apply: true));
+            Assert.Contains("a + b + 1", File.ReadAllText(source));
+        }
+        finally
+        {
+            new DraftStore().ClearTracking(project);
+        }
+    }
+
+    [Fact]
+    public void Select_drop_removes_the_draft_and_accepts_the_current_state()
+    {
+        string project = NewProject(out string directory);
+        string source = Path.Combine(directory, "Class1.cs");
+        try
+        {
+            string cookie = TrackAndTakeCookie(project);
+            DraftService.Stage(cookie, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 1; }");
+            File.WriteAllText(source, "namespace Demo;\n\npublic class Class1\n{\n    public static int Add(int a, int b) { return a + b + 100; }\n}\n");
+
+            string selectCookie = PermitStore.GrantSelect(project, AddSymbolKey);
+            Assert.Contains("移除拟定", DraftService.Select(project, AddSymbolKey, selectCookie, "drop"));
+
+            // 拟定被移掉了
+            Assert.Contains("没有未完成的拟定", DraftService.List(project));
+            // 冲突也解除了：再拟定一次就能正常预检
+            DraftService.Stage(cookie, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 200; }");
+            Assert.Contains("落盘 cookie", DraftService.Confirm(cookie, "", apply: true));
+        }
+        finally
+        {
+            new DraftStore().ClearTracking(project);
+        }
+    }
+
+    [Fact]
+    public void Select_drop_accepts_an_added_symbol_that_has_no_draft()
+    {
+        string project = NewProject(out string directory);
+        try
+        {
+            string cookie = TrackAndTakeCookie(project);
+            DraftService.Stage(cookie, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 1; }");
+            File.WriteAllText(
+                Path.Combine(directory, "Outside.cs"),
+                "namespace Demo;\n\npublic class CameFromOutside\n{\n    public void Run() { }\n}\n");
+
+            string selectCookie = PermitStore.GrantSelect(project, "Demo.CameFromOutside");
+            Assert.Contains("移除拟定", DraftService.Select(project, "Demo.CameFromOutside", selectCookie, "drop"));
+
+            Assert.Contains("落盘 cookie", DraftService.Confirm(cookie, "", apply: true));
+        }
+        finally
+        {
+            new DraftStore().ClearTracking(project);
+        }
+    }
+
+    [Fact]
+    public void Select_no_longer_offers_snapshot_and_needs_a_valid_cookie()
+    {
+        string project = NewProject(out _);
+        try
+        {
+            string cookie = TrackAndTakeCookie(project);
+            DraftService.Stage(cookie, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 1; }");
+
+            // snapshot 已经取消
+            Assert.Throws<ArgumentException>(
+                () => DraftService.Select(project, AddSymbolKey, PermitStore.GrantSelect(project, AddSymbolKey), "snapshot"));
+
+            // 用过的 cookie 不能再用
+            string used = PermitStore.GrantSelect(project, AddSymbolKey);
+            DraftService.Select(project, AddSymbolKey, used, "keep");
+            Assert.Throws<InvalidOperationException>(() => DraftService.Select(project, AddSymbolKey, used, "keep"));
+
+            // keep 需要该符号有拟定
+            string other = PermitStore.GrantSelect(project, "Demo.NotDrafted");
+            Assert.Throws<InvalidOperationException>(() => DraftService.Select(project, "Demo.NotDrafted", other, "keep"));
         }
         finally
         {
@@ -130,74 +297,16 @@ public sealed class DraftFlowTests
         string source = Path.Combine(directory, "Class1.cs");
         try
         {
-            TrackingService.Track(project);
-            DraftService.Stage(project, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 1; }");
-            string cookie = TakeCookie(DraftService.Confirm(project, "", apply: true));
+            string cookie = TrackAndTakeCookie(project);
+            DraftService.Stage(cookie, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 1; }");
+            string applyCookie = TakeCookie(DraftService.Confirm(cookie, "", apply: true));
 
             // 发许可之后文件被外部改过 → 文件字节校验必须拦住
             File.WriteAllText(source, "namespace Demo;\n\npublic class Class1\n{\n    public static int Add(int a, int b) { return a + b + 7; }\n}\n");
 
             InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
-                () => DraftService.Confirm(project, cookie, apply: true));
+                () => DraftService.Confirm(cookie, applyCookie, apply: true));
             Assert.Contains("不一致", exception.Message, StringComparison.Ordinal);
-        }
-        finally
-        {
-            new DraftStore().ClearTracking(project);
-        }
-    }
-
-    [Fact]
-    public void Select_drop_removes_the_symbol_from_the_draft()
-    {
-        string project = NewProject(out _);
-        try
-        {
-            TrackingService.Track(project);
-            DraftService.Stage(project, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 1; }");
-
-            const string symbolKey = "Demo.Class1.Add(int, int)";
-            string cookie = PermitStore.GrantSelect(project, symbolKey, "snapshot", "draft", "disk");
-
-            Assert.Contains("取消拟定", DraftService.Select(project, symbolKey, cookie, "drop"));
-            Assert.Contains("没有未完成的拟定", DraftService.List(project));
-        }
-        finally
-        {
-            new DraftStore().ClearTracking(project);
-        }
-    }
-
-    [Fact]
-    public void Select_draft_snapshot_and_disk_rewrite_the_entry()
-    {
-        string project = NewProject(out _);
-        try
-        {
-            const string symbolKey = "Demo.Class1.Add(int, int)";
-            const string drafted = "public static int Add(int a, int b) { return a + b + 1; }";
-
-            TrackingService.Track(project);
-            DraftService.Stage(project, "Demo.Class1", "Add(int,int)", drafted);
-
-            // draft：坚持拟定内容（条目内容不变，这是正确语义）
-            string draftCookie = PermitStore.GrantSelect(project, symbolKey, "SNAPSHOT", "DRAFT-IGNORED", "DISK");
-            Assert.Contains("用拟定内容", DraftService.Select(project, symbolKey, draftCookie, "draft"));
-            Assert.Equal(drafted, new DraftStore().Find(project)!.Edits[0].RequestedContent);
-            Assert.Equal("DISK", new DraftStore().Find(project)!.Edits[0].SymbolSnapshot);   // 快照 = 当前磁盘文本
-
-            // snapshot：回到编辑前
-            string snapshotCookie = PermitStore.GrantSelect(project, symbolKey, "SNAPSHOT", drafted, "DISK");
-            Assert.Contains("用快照内容", DraftService.Select(project, symbolKey, snapshotCookie, "snapshot"));
-            Assert.Equal("SNAPSHOT", new DraftStore().Find(project)!.Edits[0].RequestedContent);
-
-            // disk：取当前磁盘内容（等于不改这个符号）
-            string diskCookie = PermitStore.GrantSelect(project, symbolKey, "SNAPSHOT", drafted, "DISK");
-            Assert.Contains("用现状内容", DraftService.Select(project, symbolKey, diskCookie, "disk"));
-            Assert.Equal("DISK", new DraftStore().Find(project)!.Edits[0].RequestedContent);
-
-            // cookie 用过就不能再用
-            Assert.Throws<InvalidOperationException>(() => DraftService.Select(project, symbolKey, diskCookie, "disk"));
         }
         finally
         {
@@ -211,17 +320,18 @@ public sealed class DraftFlowTests
         string project = NewProject(out string directory);
         try
         {
-            TrackingService.Track(project);
+            string cookie = TrackAndTakeCookie(project);
             // 新建类型：目标文件此刻还不存在
-            DraftService.Stage(project, "Demo.NewType", "", "public class NewType { }");
-            Assert.Contains("落盘 cookie", DraftService.Confirm(project, "", apply: true));
+            DraftService.Stage(cookie, "Demo.NewType", "", "public class NewType { }");
+            Assert.Contains("落盘 cookie", DraftService.Confirm(cookie, "", apply: true));
 
             // 外部抢先创建了同名类型（写进同一个文件）
             File.WriteAllText(Path.Combine(directory, "NewType.cs"), "namespace Demo;\n\npublic class NewType { }\n");
 
-            string precheck = DraftService.Confirm(project, "", apply: true);
+            string precheck = DraftService.Confirm(cookie, "", apply: true);
 
-            Assert.Contains("已被外部创建", precheck);
+            Assert.Contains("未解决的冲突", precheck);
+            Assert.Contains("Demo.NewType", precheck);
             Assert.DoesNotContain("落盘 cookie：`", precheck);
         }
         finally
@@ -237,16 +347,16 @@ public sealed class DraftFlowTests
         string source = Path.Combine(directory, "Class1.cs");
         try
         {
-            TrackingService.Track(project);
+            string cookie = TrackAndTakeCookie(project);
             // 往既有类里加成员：文件已存在，但这不是"新建文件"，不该被拦
-            DraftService.Stage(project, "Demo.Class1", "Sub(int,int)", "public static int Sub(int a, int b) { return a - b; }");
+            DraftService.Stage(cookie, "Demo.Class1", "Sub(int,int)", "public static int Sub(int a, int b) { return a - b; }");
 
-            string precheck = DraftService.Confirm(project, "", apply: true);
+            string precheck = DraftService.Confirm(cookie, "", apply: true);
 
             Assert.Contains("落盘 cookie", precheck);
             Assert.DoesNotContain("新建目标文件已存在", precheck);
 
-            Assert.Contains("已落盘", DraftService.Confirm(project, TakeCookie(precheck), apply: true));
+            Assert.Contains("已落盘", DraftService.Confirm(cookie, TakeCookie(precheck), apply: true));
 
             string text = File.ReadAllText(source);
             Assert.Contains("public static int Sub(int a, int b)", text, StringComparison.Ordinal);
@@ -265,15 +375,15 @@ public sealed class DraftFlowTests
         string source = Path.Combine(directory, "Class1.cs");
         try
         {
-            TrackingService.Track(project);
-            DraftService.Stage(project, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 1; }");
-            string cookie = TakeCookie(DraftService.Confirm(project, "", apply: true));
+            string cookie = TrackAndTakeCookie(project);
+            DraftService.Stage(cookie, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 1; }");
+            string applyCookie = TakeCookie(DraftService.Confirm(cookie, "", apply: true));
 
             // 窗口期内把符号整个删掉：不能静默少写一部分
             File.WriteAllText(source, "namespace Demo;\n\npublic class Class1\n{\n}\n");
 
             InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
-                () => DraftService.Confirm(project, cookie, apply: true));
+                () => DraftService.Confirm(cookie, applyCookie, apply: true));
             Assert.Contains("定位不到", exception.Message, StringComparison.Ordinal);
         }
         finally
@@ -312,15 +422,15 @@ public sealed class DraftFlowTests
             File.WriteAllText(
                 Path.Combine(directory, "Other.cs"),
                 "namespace Demo;\n\npublic class Other\n{\n    public static int Add(int a, int b) { return a + b; }\n}\n");
-            TrackingService.Track(project);
-            DraftService.Stage(project, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 1; }");
-            DraftService.Stage(project, "Demo.Other", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 2; }");
+            string cookie = TrackAndTakeCookie(project);
+            DraftService.Stage(cookie, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 1; }");
+            DraftService.Stage(cookie, "Demo.Other", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 2; }");
 
-            string cookie = PermitStore.GrantSelect(project, "Demo.Class1.Add(int, int)", "S", "D", "K");
+            string selectCookie = PermitStore.GrantSelect(project, AddSymbolKey);
 
             // 成员名 "Add(int,int)" 同时命中两个类型 → 不猜，要求完整符号键
             InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
-                () => DraftService.Select(project, "Add(int,int)", cookie, "drop"));
+                () => DraftService.Select(project, "Add(int,int)", selectCookie, "drop"));
 
             Assert.Contains("命中 2 条", exception.Message, StringComparison.Ordinal);
         }
@@ -336,11 +446,11 @@ public sealed class DraftFlowTests
         string project = NewProject(out _);
         try
         {
-            TrackingService.Track(project);
+            string cookie = TrackAndTakeCookie(project);
             // 引用一个不存在的成员：拟定本身语法合法，但应用后会新增一个编译错误
-            DraftService.Stage(project, "Demo.Class1", "Bad()", "public static int Bad() { return NotExist.Value; }");
+            DraftService.Stage(cookie, "Demo.Class1", "Bad()", "public static int Bad() { return NotExist.Value; }");
 
-            string precheck = DraftService.Confirm(project, "", apply: true);
+            string precheck = DraftService.Confirm(cookie, "", apply: true);
 
             Assert.Contains("## 诊断对比", precheck);
             Assert.Contains("CS", precheck);                  // 报出了具体的编译错误码
@@ -359,12 +469,12 @@ public sealed class DraftFlowTests
         string outer = Path.Combine(directory, "Class1.cs");
         try
         {
-            TrackingService.Track(project);
+            string cookie = TrackAndTakeCookie(project);
             // 新建内部类：外层类要自动补 partial，内部类落到 Class1.Inner.cs
             // content 是**类型体**（成员列表），不是完整类型声明
-            DraftService.Stage(project, "Demo.Class1.Inner", "", "public int V;");
+            DraftService.Stage(cookie, "Demo.Class1.Inner", "", "public int V;");
 
-            Assert.Contains("已落盘", DraftService.Confirm(project, TakeCookie(DraftService.Confirm(project, "", apply: true)), apply: true));
+            Assert.Contains("已落盘", DraftService.Confirm(cookie, TakeCookie(DraftService.Confirm(cookie, "", apply: true)), apply: true));
 
             Assert.Contains("partial class Class1", File.ReadAllText(outer), StringComparison.Ordinal);
             Assert.True(File.Exists(Path.Combine(directory, "Class1.Inner.cs")));
@@ -392,10 +502,10 @@ public sealed class DraftFlowTests
             ];
             File.WriteAllBytes(source, [.. bytes]);
 
-            TrackingService.Track(project);
-            DraftService.Stage(project, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 1; }");
+            string cookie = TrackAndTakeCookie(project);
+            DraftService.Stage(cookie, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 1; }");
 
-            string precheck = DraftService.Confirm(project, "", apply: true);
+            string precheck = DraftService.Confirm(cookie, "", apply: true);
 
             Assert.Contains("无法判定编码", precheck);
             Assert.DoesNotContain("落盘 cookie：`", precheck);
@@ -412,18 +522,18 @@ public sealed class DraftFlowTests
         string project = NewProject(out _);
         try
         {
-            TrackingService.Track(project);
-            DraftService.Stage(project, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 1; }");
-            string cookie = TakeCookie(DraftService.Confirm(project, "", apply: true));
+            string first = TrackAndTakeCookie(project);
+            DraftService.Stage(first, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 1; }");
+            string applyCookie = TakeCookie(DraftService.Confirm(first, "", apply: true));
 
             TrackingService.Untrack(project, new DraftStore().GetTracking(project)!.TrackingCookie);
 
             // 同一项目再开一轮，但不重新预检：旧 applyCookie 必须已经失效
-            TrackingService.Track(project);
-            DraftService.Stage(project, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 3; }");
+            string second = TrackAndTakeCookie(project);
+            DraftService.Stage(second, "Demo.Class1", "Add(int,int)", "public static int Add(int a, int b) { return a + b + 3; }");
 
             InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
-                () => DraftService.Confirm(project, cookie, apply: true));
+                () => DraftService.Confirm(second, applyCookie, apply: true));
 
             Assert.Contains("没有有效的落盘许可", exception.Message, StringComparison.Ordinal);
         }
