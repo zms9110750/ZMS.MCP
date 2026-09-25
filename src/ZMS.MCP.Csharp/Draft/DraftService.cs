@@ -1079,26 +1079,30 @@ public static class DraftService
             .. previous.Errors.Select(item => item.PairingKey),
             .. previous.Warnings.Select(item => item.PairingKey),
         ];
-        List<DiagnosticKey> added =
+        List<DiagnosticKey> addedErrors =
         [
             .. current.Errors.Where(item => !existing.Contains(item.PairingKey)),
+        ];
+        List<DiagnosticKey> addedWarnings =
+        [
             .. current.Warnings.Where(item => !existing.Contains(item.PairingKey)),
         ];
-        if (added.Count == 0)
+        int total = addedErrors.Count + addedWarnings.Count;
+        // 数量要显式报出来（错误 / 警告分开），否则"新增/消失"是空的还是若干条要靠数
+        builder.AppendLine($"- {label}：{total} 条（错误 {addedErrors.Count} / 警告 {addedWarnings.Count}）");
+        if (total == 0)
         {
-            builder.AppendLine($"- {label}：无");
             return;
         }
 
-        builder.AppendLine($"- {label}：");
-        foreach (DiagnosticKey item in added.Take(50))
+        foreach (DiagnosticKey item in addedErrors.Concat(addedWarnings).Take(50))
         {
             builder.AppendLine($"  - {item}");
         }
 
-        if (added.Count > 50)
+        if (total > 50)
         {
-            builder.AppendLine($"  - …（还有 {added.Count - 50} 条）");
+            builder.AppendLine($"  - …（还有 {total - 50} 条）");
         }
     }
 
