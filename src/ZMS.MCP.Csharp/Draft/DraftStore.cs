@@ -469,6 +469,12 @@ public sealed class DraftStore
 
         SqliteConnection connection = new($"Data Source={_databasePath}");
         connection.Open();
+        using (SqliteCommand busy = connection.CreateCommand())
+        {
+            // 并发时（xunit 并行跑用例）sqlite 的写锁会互相等待；默认 busy_timeout=0 会直接报 database is locked。
+            busy.CommandText = "PRAGMA busy_timeout = 10000;";
+            busy.ExecuteNonQuery();
+        }
         using SqliteCommand schema = connection.CreateCommand();
         schema.CommandText =
             """

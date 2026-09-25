@@ -653,7 +653,7 @@ public static class DraftService
             file => file.Key,
             file => FileWriter.ComputeHash(file.Key),
             StringComparer.OrdinalIgnoreCase);
-        (bool formatted, string formatLog) = RunFormat(projectPath, [.. files.Select(file => file.Key)]);
+        (bool formatted, string formatLog) = FormatRunner(projectPath, [.. files.Select(file => file.Key)]);
         List<string> reformatted =
         [
             .. files
@@ -1103,6 +1103,12 @@ public static class DraftService
     }
 
     /// <summary>跑 dotnet format；返回「是否成功」与给 agent 看的说明（失败不抛，交给调用方决定保留拟定）。</summary>
+    /// <summary>
+    /// 跑 dotnet format 的入口：**测试可替换成 no-op**（端到端用例验的是落盘语义，
+    /// 不该为一次真实格式化等几十秒）。生产默认就是真跑。
+    /// </summary>
+    internal static Func<string, IReadOnlyList<string>, (bool Succeeded, string Log)> FormatRunner = RunFormat;
+
     private static (bool Succeeded, string Log) RunFormat(string projectPath, IReadOnlyList<string> files)
     {
         if (files.Count == 0)
