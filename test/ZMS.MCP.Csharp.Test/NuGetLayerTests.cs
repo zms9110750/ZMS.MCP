@@ -525,18 +525,18 @@ public sealed class NuGetLayerTests
     }
 
     [Fact]
-    public void ResolveVersion_skips_vulnerable_cached_versions()
+    public void ResolveVersion_refuses_when_every_cached_version_is_vulnerable()
     {
-        // 这个包在本地缓存里；把它所有版本标成受影响，就会退回「最高版本」并**标成有漏洞**（而不是默默当安全）
+        // 这个包在本地缓存里；把它所有版本标成受影响 → 按审查规则应**报错**（不再退回有漏洞的最高版）
         IReadOnlyList<ComparableVersion> cached = NuGetCache.Versions("microsoft.codeanalysis.csharp");
         Assert.NotEmpty(cached);
         VulnerabilityIndexData index = Index(("microsoft.codeanalysis.csharp", ["[0.0.0,)"]));
 
-        PackageManager.VersionChoice choice = PackageManager.ResolveVersion("microsoft.codeanalysis.csharp", "", false, index);
+        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
+            () => PackageManager.ResolveVersion("microsoft.codeanalysis.csharp", "", false, index));
 
-        Assert.Equal(cached[0].Original, choice.Version);
-        Assert.True(choice.Vulnerable);
-        Assert.False(choice.IndexUnavailable);
+        Assert.Contains("找不到无漏洞的正式版", exception.Message);
+        Assert.Contains("显式指定版本", exception.Message);
     }
 
     [Fact]
@@ -554,18 +554,17 @@ public sealed class NuGetLayerTests
     }
 
     [Fact]
-    public void ResolveVersion_reports_an_unavailable_index_instead_of_pretending_it_is_safe()
+    public void ResolveVersion_refuses_when_the_index_is_unavailable()
     {
-        // 索引拿不到时不能自动升级（PickLatestSafe 直接返回 null），而且要显式说明"没核对过"
-        PackageManager.VersionChoice choice = PackageManager.ResolveVersion(
-            "microsoft.codeanalysis.csharp",
-            "",
-            false,
-            VulnerabilityIndexData.Unavailable);
+        // 索引拿不到时不能自动选版（PickLatestSafe 直接返回 null）→ 按审查规则应报错并说明原因
+        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
+            () => PackageManager.ResolveVersion(
+                "microsoft.codeanalysis.csharp",
+                "",
+                false,
+                VulnerabilityIndexData.Unavailable));
 
-        Assert.NotEmpty(choice.Version);
-        Assert.True(choice.IndexUnavailable);
-        Assert.False(choice.Vulnerable);
+        Assert.Contains("漏洞索引不可用", exception.Message);
         Assert.Null(VulnerabilityIndex.PickLatestSafe(
             VulnerabilityIndexData.Unavailable,
             "microsoft.codeanalysis.csharp",

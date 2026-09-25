@@ -108,7 +108,7 @@ public static class PackageManager
         builder.AppendLine("# 以下包因为被引用而未直接引入");
         Append(builder, coveredByOthers);
         builder.AppendLine();
-        builder.AppendLine("# 以下包因为漏洞被自动升级引入");
+        builder.AppendLine("# 以下包因为漏洞被换成了别的版本");
         Append(builder, upgraded);
         builder.AppendLine();
         builder.AppendLine("# 以下包被本次传递引入");
@@ -340,19 +340,23 @@ public static class PackageManager
             throw new InvalidOperationException($"找不到 {packageName} 的任何可用版本。");
         }
 
-        ComparableVersion? safe = VulnerabilityIndex.PickLatestSafe(vulnerabilities, packageName, local);
-        if (safe != null)
+        // 按审查规则收窄候选：以**候选里最高的那个**的大版本为下界（往上至少没漏洞；
+        // 往下换更低版本入不敷出），且不含预览版。
+        local.Sort();
+        ComparableVersion highest = local[^1];
+        List<ComparableVersion> selectable = VulnerabilityIndex.SelectableCandidates(highest, local);
+
+        ComparableVersion? safe = VulnerabilityIndex.PickLatestSafe(vulnerabilities, packageName, selectable);
+        if (safe == null)
         {
-            return new VersionChoice(safe.Original, Vulnerable: false, IndexUnavailable: false);
+            // 不退回有漏洞的版本：直接报错，要装就由调用方显式指定版本。
+            string reason = vulnerabilities.Available ? "" : "（漏洞索引不可用，无法核对安全版本）";
+            throw new InvalidOperationException(
+                $"{packageName} 在 {highest.Numbers[0]}.x 及以上找不到无漏洞的正式版{reason}。"
+                + $"要装就显式指定版本，例如 {packageName}@{highest.Original}。");
         }
 
-        // 没有安全版本（或索引拿不到）：不擅自声称"这是安全的" ——
-        // 让调用方把它列进「有漏洞」一栏，索引不可用时至少也要提示"没核对过"。
-        local.Sort();
-        return new VersionChoice(
-            local[^1].Original,
-            Vulnerable: vulnerabilities.Available,
-            IndexUnavailable: !vulnerabilities.Available);
+        return new VersionChoice(safe.Original, Vulnerable: false, IndexUnavailable: false);
     }
 
     /// <summary>
