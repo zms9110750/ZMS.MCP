@@ -190,14 +190,16 @@ public static class NuGetTools
             }
 
             string? onlineNuspec = null;
+            string? onlineFailure = null;
             string? readmeName = null;
             try
             {
                 onlineNuspec = NuGetOnline.FetchNuspec(packName, version);
             }
-            catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
+            catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or TimeoutException)
             {
-                onlineNuspec = null;
+                // 网络/超时失败**不能**当成"包不存在"：记下原因，最后区分开来报给调用方。
+                onlineFailure = exception.Message;
             }
 
             if (onlineNuspec != null)
@@ -209,12 +211,18 @@ public static class NuGetTools
                 {
                     onlineReadme = NuGetOnline.FetchReadme(packName, version, readmeName);
                 }
-                catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
+                catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or TimeoutException)
                 {
+                    // readme 拿不到不影响主结果（nuspec 已经有了），这里只当作"没有 readme"
                     onlineReadme = null;
                 }
 
                 return Render(packName, version, "nuget.org", onlineNuspec, onlineReadme, project, repository);
+            }
+
+            if (onlineFailure != null)
+            {
+                return $"# {packName} {version}\n本地缓存没有，线上取失败：{onlineFailure}";
             }
 
             return $"# {packName} {version}\n未找到（本地缓存与 nuget.org 都没有）。";
