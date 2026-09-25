@@ -64,14 +64,15 @@ public static class ReferenceFinder
     }
 
     /// <summary>
-    /// 渲染成给 agent 看的文本。给**类型**时（符号不精确）只说明「在哪些类型里被引用了多少次」；
-    /// 给**成员**时（符号精确）说到「某个类型的某个成员里被引用多少次」。
-    /// 成员级条目超过上限就缩略成按类型聚合。任何情况下都不给文件名与行号。
+    /// 渲染成给 agent 看的文本。**「精确」= path 命中了一个具体符号** —— 类型与成员都算精确；
+    /// 只有"没指到具体符号"（命名空间）才算不精确、只报类型级汇总。
+    /// 精确时说到「某个类型的某个成员里被引用多少次」；成员级条目超过上限就缩略成按类型聚合。
+    /// 任何情况下都不给文件名与行号。
     /// </summary>
     public static string Describe(Compilation compilation, ISymbol target)
     {
-        // 「精确」由符号自己决定：给类型就是不精确（只报类型级），给成员才算精确（报到成员级）。
-        bool exact = target is not INamedTypeSymbol;
+        // 「精确」= 命中一个具体符号：类型与成员都算精确，只有命名空间这种"没指到具体符号"的才算不精确。
+        bool exact = target is not INamespaceSymbol;
         IReadOnlyList<SymbolReferenceCount> counts = Count(compilation, target);
         StringBuilder builder = new();
         builder.AppendLine("## 引用");
