@@ -436,6 +436,37 @@ public sealed class DraftLayerTests
     }
 
     [Fact]
+    public void ConflictService_AcceptCurrent_keeps_a_not_yet_resolved_added_conflict()
+    {
+        // 回归（阻塞 1）：AcceptCurrent 曾经以"现状"为底重建基线，于是"外部新增、基线里本来
+        // 没有"的符号会凭空进入基线，Unresolved 再也看不见它 —— 用户解决掉别的冲突后就静默
+        // 漏掉这个冲突并直接落盘，覆盖别人的改动。这里锁住：没解决的 Added 冲突必须仍然报出来。
+        string root = NewTempDirectory();
+        DraftStore store = new(Path.Combine(root, "drafts.db"));
+        string project = Path.Combine(root, "Demo.csproj");
+        store.SaveTracking(project, "track-cookie", new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["Demo.A"] = "OLD-A",
+        });
+        // 外部新增了 Demo.New（基线里没有它），同时 Demo.A 也被改了
+        Dictionary<string, string> current = new(StringComparer.Ordinal)
+        {
+            ["Demo.A"] = "NOW-A",
+            ["Demo.New"] = "NOW-NEW",
+        };
+
+        ConflictService.AcceptCurrent(project, "Demo.A", current, store.DatabasePath);
+
+        TrackingRecord after = store.GetTracking(project)!;
+        Assert.Equal("NOW-A", after.Baseline["Demo.A"]);          // 解决过的 → 更新为现在的 hash
+        Assert.False(after.Baseline.ContainsKey("Demo.New"));     // 没解决的"新增"不能混进基线
+
+        IReadOnlyList<SymbolConflict> conflicts = ConflictService.Unresolved(after.Baseline, current, []);
+        Assert.Contains(conflicts, item => item.SymbolKey == "Demo.New" && item.Kind == ConflictKind.Added);
+        Assert.DoesNotContain(conflicts, item => item.SymbolKey == "Demo.A");
+    }
+
+    [Fact]
     public void DraftStore_finds_a_tracking_record_by_its_cookie()
     {
         string root = NewTempDirectory();
