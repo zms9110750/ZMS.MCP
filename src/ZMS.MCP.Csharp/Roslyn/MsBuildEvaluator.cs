@@ -275,7 +275,7 @@ public static class MsBuildEvaluator
             "-t:ResolveReferences",
             // MSBuildProjectExtensionsPath = obj 的真实位置（可能被 BaseIntermediateOutputPath 重定向），
             // 调用方靠它定位 *.nuget.g.props|targets，而不是硬编码 <项目目录>/obj/
-            "-getProperty:TargetFramework,DefineConstants,AssemblyName,RootNamespace,Nullable,ProjectAssetsFile,MSBuildProjectExtensionsPath",
+            "-getProperty:TargetFramework,DefineConstants,AssemblyName,RootNamespace,Nullable,ProjectAssetsFile,MSBuildProjectExtensionsPath,LangVersion",
             "-getItem:Compile,ReferencePath",
         ];
 
