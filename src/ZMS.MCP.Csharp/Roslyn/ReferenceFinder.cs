@@ -31,7 +31,7 @@ public static class ReferenceFinder
             SemanticModel model = compilation.GetSemanticModel(tree);
             foreach (SyntaxNode node in tree.GetRoot().DescendantNodes())
             {
-                if (node is not (IdentifierNameSyntax or GenericNameSyntax or MemberAccessExpressionSyntax))
+                if (node is not (IdentifierNameSyntax or GenericNameSyntax))
                 {
                     continue;
                 }
