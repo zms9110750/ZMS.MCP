@@ -27,7 +27,15 @@ public static class NuGetTools
     {
         return ToolGuard.Run(() =>
         {
-            HashSet<string> localNames = new(NuGetCache.SearchPackages(packName), StringComparer.OrdinalIgnoreCase);
+            if (!local && !web)
+            {
+                throw new InvalidOperationException("local 与 web 至少要开一个（两个都关就没有可查的来源）。");
+            }
+
+            // 只在开了 local 时才读本地缓存（Description 说 local = search the local cache）
+            HashSet<string> localNames = local
+                ? new HashSet<string>(NuGetCache.SearchPackages(packName), StringComparer.OrdinalIgnoreCase)
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             List<string> names = [];
             if (local)
             {
@@ -98,7 +106,13 @@ public static class NuGetTools
                 throw new InvalidOperationException($"Bad version range: {exception.Message}");
             }
 
-            List<ComparableVersion> localVersions = [.. NuGetCache.Versions(packName)];
+            if (!local && !web)
+            {
+                throw new InvalidOperationException("local 与 web 至少要开一个（两个都关就没有可查的来源）。");
+            }
+
+            // 只在开了 local 时才读本地缓存（Description 说 local = local cache）
+            List<ComparableVersion> localVersions = local ? [.. NuGetCache.Versions(packName)] : [];
             List<ComparableVersion> versions = [.. localVersions];
             string source = "本地缓存";
             if (web)
