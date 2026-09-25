@@ -362,8 +362,8 @@ public sealed class NuGetLayerTests
     public void PackageGraph_parses_package_paths_from_the_cache_root()
     {
         (string Id, string Version)? parsed = PackageGraph.ParsePackagePath(
-            @"X:\dotnet\nuget-packages\microsoft.codeanalysis.csharp\5.9.0\lib\net10.0\Microsoft.CodeAnalysis.CSharp.dll",
-            @"X:\dotnet\nuget-packages");
+            @"C:\nuget-cache\microsoft.codeanalysis.csharp\5.9.0\lib\net10.0\Microsoft.CodeAnalysis.CSharp.dll",
+            @"C:\nuget-cache");
 
         Assert.Equal("microsoft.codeanalysis.csharp", parsed?.Id);
         Assert.Equal("5.9.0", parsed?.Version);
@@ -372,10 +372,10 @@ public sealed class NuGetLayerTests
     [Fact]
     public void PackageGraph_ignores_paths_outside_the_cache_and_too_short_ones()
     {
-        Assert.Null(PackageGraph.ParsePackagePath(@"C:\Program Files\dotnet\shared\System.dll", @"X:\dotnet\nuget-packages"));
+        Assert.Null(PackageGraph.ParsePackagePath(@"C:\dotnet\shared\System.dll", @"C:\nuget-cache"));
         // 第二段不是版本号 → 不是包路径
-        Assert.Null(PackageGraph.ParsePackagePath(@"X:\dotnet\nuget-packages\onlypackage\lib\x.dll", @"X:\dotnet\nuget-packages"));
-        Assert.Null(PackageGraph.ParsePackagePath(@"X:\dotnet\nuget-packages\onlypackage\1.0.0", @"X:\dotnet\nuget-packages"));
+        Assert.Null(PackageGraph.ParsePackagePath(@"C:\nuget-cache\onlypackage\lib\x.dll", @"C:\nuget-cache"));
+        Assert.Null(PackageGraph.ParsePackagePath(@"C:\nuget-cache\onlypackage\1.0.0", @"C:\nuget-cache"));
     }
 
     [Fact]
