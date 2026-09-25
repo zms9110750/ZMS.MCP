@@ -91,6 +91,14 @@ public static class SolutionViewer
             throw new InvalidOperationException($"dotnet sln migrate 失败（退出码 {result.ExitCode}）：\n{result.Output}");
         }
 
+        if (!File.Exists(target))
+        {
+            // dotnet sln migrate 退出码为 0 也可能没生成产物；不核对就报"迁移完成"是骗人的，
+            // 用户会以为已经迁好、接着去操作一个不存在的 slnx。
+            throw new InvalidOperationException(
+                $"dotnet sln migrate 退出码为 0，但没有生成 {target}。命令行输出：\n{result.Output}");
+        }
+
         StringBuilder builder = new();
         builder.AppendLine("# 迁移完成（命令行改盘，不进事务）");
         builder.AppendLine($"- 源：{solution}");
