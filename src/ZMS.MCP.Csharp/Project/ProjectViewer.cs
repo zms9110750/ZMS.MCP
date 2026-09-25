@@ -43,7 +43,7 @@ public static class ProjectViewer
         AddNearest(files, "目录级（中央包管理版本）", projectDirectory, "Directory.Packages.props");
         AddNearest(files, "目录级（MSBuild 自动导入，取最近一份）", projectDirectory, "Directory.Build.targets");
         AddNearest(files, "SDK 版本固定", projectDirectory, "global.json");
-        AddNearest(files, "NuGet 源配置", projectDirectory, "NuGet.config");
+        AddNearest(files, "NuGet 源配置（这里只列最近一份；NuGet 实际会级联合并上下所有层级）", projectDirectory, "NuGet.config");
 
         // 生成物：还原时产生的 props/targets。obj 的位置问 MSBuild（可能被 BaseIntermediateOutputPath 重定向），
         // 问不到就不猜 —— 宁可少列，也不给一个可能错的路径
