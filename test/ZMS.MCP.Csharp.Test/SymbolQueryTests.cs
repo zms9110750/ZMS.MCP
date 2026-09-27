@@ -135,6 +135,24 @@ public sealed class SymbolQueryTests
     }
 
     [Fact]
+    public void List_skips_namespaces_that_only_wrap_other_namespaces()
+    {
+        // ZMS / ZMS.MCP 这种纯层级外壳（下面只有命名空间、自己没有类型定义）不该各出一条：
+        // 它们的位置串等于整棵子树的所有文件，看起来跟最深的那条完全重复。
+        LoadedProject project = LoadSelf();
+
+        IReadOnlyList<SymbolEntry> entries = SymbolQuery.List(
+            project.Compilation, SymbolKinds.Namespace, SymbolModifiers.None, []);
+        List<string> names = [.. entries.Where(entry => entry.Kind == "namespace").Select(entry => entry.Namespace)];
+
+        Assert.DoesNotContain("ZMS", names);
+        Assert.DoesNotContain("ZMS.MCP", names);
+        // 有类型定义的命名空间照旧保留（ZMS.MCP.Csharp 里有 PathComparison）
+        Assert.Contains("ZMS.MCP.Csharp", names);
+        Assert.Contains(names, name => name.EndsWith(".Roslyn", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void List_filters_by_kind_letters()
     {
         LoadedProject project = LoadSelf();

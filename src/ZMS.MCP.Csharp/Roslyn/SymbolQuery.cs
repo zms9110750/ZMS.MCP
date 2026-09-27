@@ -292,12 +292,17 @@ public static class SymbolQuery
 
     private static void CollectNamespace(INamespaceSymbol @namespace, List<SymbolEntry> entries, QueryFilter filter)
     {
+        // 只有子命名空间、自己没有类型定义的命名空间不列：否则 ZMS / ZMS.MCP 这类纯层级外壳
+        // 会各自出现一条，且"位置"是整棵子树的所有文件，看起来跟最深的那条完全重复。
+        bool emptyContainer = !@namespace.GetTypeMembers().Any() && @namespace.GetNamespaceMembers().Any();
+
         // 给了参数过滤时只看方法：命名空间和类型都不该出现；命名空间没有访问性/静态等修饰符，
         // 所以给了任何修饰符过滤时它都会被排除
         if (filter.ArgumentTypes.Count == 0 &&
             @namespace.ContainingNamespace != null &&
             filter.Kinds.HasFlag(SymbolKinds.Namespace) &&
             IsInSource(@namespace) &&
+            !emptyContainer &&
             MatchesModifiers(@namespace, filter.Modifiers) &&
             MatchesDocumented(@namespace, filter))
         {
