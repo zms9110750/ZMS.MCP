@@ -1,3 +1,4 @@
+using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 
@@ -369,25 +370,91 @@ public static class SymbolLocator
         return true;
     }
 
-    /// <summary>比较参数类型：支持 C# 关键字别名（string/int/...）、简名与全名。</summary>
+    /// <summary>
+    /// 比较参数类型。**两边都先规范化**再比，所以下面这些写法都认：
+    /// <c>string</c> / <c>String</c> / <c>System.String</c>；
+    /// <c>string?</c> / <c>string</c>（可空标注不算签名的一部分）；
+    /// <c>string[]</c>；<c>List&lt;int&gt;</c> / <c>System.Collections.Generic.List&lt;int&gt;</c>。
+    /// 规范化 = 去空白、去可空标注、关键字映射成 BCL 名、每段标识符只留最后一段。
+    /// </summary>
     internal static bool TypeMatches(string expected, ITypeSymbol type)
     {
-        string trimmed = expected.Trim();
-        string full = type.ToDisplayString(QualifiedNameFormat);
-        string shortName = type.Name;
-        if (string.Equals(trimmed, full, StringComparison.Ordinal) ||
-            string.Equals(trimmed, shortName, StringComparison.Ordinal))
+        string wanted = Normalize(expected);
+        string actual = Normalize(TypeText(type));
+
+        return string.Equals(wanted, actual, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>把一个类型符号写成源码风格的简名（<c>List&lt;int&gt;</c>、<c>string[]</c>）。</summary>
+    private static string TypeText(ITypeSymbol type)
+    {
+        switch (type)
         {
-            return true;
+            case IArrayTypeSymbol array:
+                return TypeText(array.ElementType) + "[]";
+
+            case IPointerTypeSymbol pointer:
+                return TypeText(pointer.PointedAtType) + "*";
+
+            case INamedTypeSymbol named when named.IsGenericType:
+                // 元数（List`1 里的 `1）不进比较
+                string name = named.Name;
+                int tick = name.IndexOf('`');
+                if (tick > 0)
+                {
+                    name = name[..tick];
+                }
+
+                return name + "<" + string.Join(',', named.TypeArguments.Select(TypeText)) + ">";
+
+            default:
+                // 数组的 Name 是空串，所以这里要留个退路
+                return type.Name.Length > 0 ? type.Name : type.ToDisplayString(QualifiedNameFormat);
+        }
+    }
+
+    /// <summary>规范化一个类型写法：逐段去命名空间前缀、关键字映射到 BCL 名、丢掉空白与 <c>?</c>。</summary>
+    private static string Normalize(string text)
+    {
+        StringBuilder builder = new();
+        StringBuilder buffer = new();
+        foreach (char letter in text)
+        {
+            if (letter is '<' or '>' or ',' or '[' or ']' or '?' or ' ')
+            {
+                Flush(builder, buffer);
+                if (letter is not ('?' or ' '))
+                {
+                    builder.Append(letter);
+                }
+
+                continue;
+            }
+
+            buffer.Append(letter);
         }
 
-        if (KeywordAliases.TryGetValue(trimmed, out string? alias))
-        {
-            return string.Equals(alias, shortName, StringComparison.Ordinal);
-        }
+        Flush(builder, buffer);
+        return builder.ToString();
 
-        return string.Equals(trimmed, full, StringComparison.OrdinalIgnoreCase) ||
-               string.Equals(trimmed, shortName, StringComparison.OrdinalIgnoreCase);
+        static void Flush(StringBuilder target, StringBuilder pending)
+        {
+            if (pending.Length == 0)
+            {
+                return;
+            }
+
+            string piece = pending.ToString();
+            pending.Clear();
+
+            int dot = piece.LastIndexOf('.');
+            if (dot >= 0)
+            {
+                piece = piece[(dot + 1)..];
+            }
+
+            target.Append(KeywordAliases.TryGetValue(piece, out string? mapped) ? mapped : piece);
+        }
     }
 
     private static readonly Dictionary<string, string> KeywordAliases = new(StringComparer.Ordinal)

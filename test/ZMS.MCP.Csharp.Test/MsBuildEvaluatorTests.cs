@@ -63,7 +63,7 @@ public sealed class MsBuildEvaluatorTests
     // ───────── 缓存失效：源文件指纹 ─────────
 
     [Fact]
-    public void SourceFingerprint_changes_when_source_files_are_added_or_touched()
+    public void SourceFingerprint_only_follows_the_file_list()
     {
         string project = NewFakeProject(out string directory);
         File.WriteAllText(Path.Combine(directory, "A.cs"), "class A { }");
@@ -75,9 +75,15 @@ public sealed class MsBuildEvaluatorTests
         string added = MsBuildEvaluator.SourceFingerprint(project);
         Assert.NotEqual(before, added);
 
-        // 改动已有源文件 → 指纹也变
+        // 删掉又回到原样
+        File.Delete(Path.Combine(directory, "B.cs"));
+        Assert.Equal(before, MsBuildEvaluator.SourceFingerprint(project));
+
+        // 只改内容 / 只动写入时间 → 指纹**不变**：求值结果里跟 .cs 有关的只有"编译哪些文件"，
+        // 内容变化由每次都重读文件的那一层（LoadedProject.Load）负责，不该为此作废整个求值。
+        File.WriteAllText(Path.Combine(directory, "A.cs"), "class A { public int Value; }");
         File.SetLastWriteTimeUtc(Path.Combine(directory, "A.cs"), DateTime.UtcNow.AddMinutes(5));
-        Assert.NotEqual(added, MsBuildEvaluator.SourceFingerprint(project));
+        Assert.Equal(before, MsBuildEvaluator.SourceFingerprint(project));
 
         // bin / obj 里的 .cs 不算数
         string obj = Path.Combine(directory, "obj");

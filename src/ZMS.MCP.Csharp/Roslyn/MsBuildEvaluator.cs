@@ -128,34 +128,25 @@ public static class MsBuildEvaluator
     }
 
     /// <summary>
-    /// 源文件指纹（文件数 + 最新写入时间）。
-    /// 新增 / 删除 / 改动 <c>.cs</c> 也要让缓存失效 —— MSBuild 的 <c>Compile</c> 项来自 glob，
-    /// 新文件不会体现在 <see cref="WatchedFileNames"/> 那些"监视文件"里，
-    /// 否则刚落盘的新类型在本次会话里会一直看不到。
+    /// 源文件指纹：**排序后的源文件完整路径集合**，不掺写入时间。
+    ///
+    /// 为什么只认文件列表：MSBuild 求值结果里跟 <c>.cs</c> 有关的**只有 <c>Compile</c> 项**（"编译哪些文件"）。
+    /// 新增 / 删除会改它（而且新文件不走 <see cref="WatchedFileNames"/> 那些"监视文件"，不在这里抓就永远看不到）；
+    /// 但**只改内容不会改它** —— 内容变化由 <c>LoadedProject.Load</c> 那一层负责（它每次都重读文件，没有整份编译缓存）。
+    /// 掺上写入时间就等于"改任何一行都作废整个求值"，白等几秒。
     /// </summary>
     internal static string SourceFingerprint(string projectPath)
     {
         string directory = Path.GetDirectoryName(Path.GetFullPath(projectPath)) ?? ".";
-        int count = 0;
-        long latest = 0;
+
+        List<string> names = [];
         foreach (string file in EnumerateSourceFiles(directory))
         {
-            count++;
-            try
-            {
-                long ticks = File.GetLastWriteTimeUtc(file).Ticks;
-                if (ticks > latest)
-                {
-                    latest = ticks;
-                }
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-            {
-                // 读不到就只记数，不影响"有变化就失效"的判断
-            }
+            names.Add(Path.GetFullPath(file));
         }
 
-        return $"{count}:{latest}";
+        names.Sort(StringComparer.Ordinal);
+        return $"{names.Count}:{string.Join('|', names)}";
     }
 
     /// <summary>递归枚举项目目录下的 <c>.cs</c>（跳过 <c>bin</c> / <c>obj</c>）。</summary>

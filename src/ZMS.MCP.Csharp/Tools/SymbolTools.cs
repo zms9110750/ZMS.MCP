@@ -24,7 +24,7 @@ public static class SymbolTools
     [Description(
         "One symbol tool with two modes: list symbols, or read a symbol. " +
         "path empty = list the symbols declared in the project's own source (referenced assemblies are excluded); " +
-        "type = letters from NCSITPFEMD (N namespace, C class, S struct, I interface, T the three type kinds, P property, F field, E event, M method, D only symbols carrying an XML doc comment); empty = all; " +
+        "type = letters from NCSITPFEMD (N namespace, C class, S struct, I interface, T the three type kinds, P property, F field, E event, M method, D delegate); empty = all; " +
         "modifier = comma separated public / internal / protected / private / static / const / abstract / readonly / virtual / override, every given condition must match; " +
         "argsList = comma separated parameter types, when set only methods with exactly those parameter types are listed; " +
         "nameFilter = case-insensitive substring filter on the fully qualified name. " +
@@ -92,12 +92,6 @@ public static class SymbolTools
         {
             builder.AppendLine();
             builder.AppendLine("_(无匹配符号)_");
-            if (kinds.HasFlag(SymbolKinds.Document))
-            {
-                // D 是"只看带文档注释的符号"的开关：误用它会让结果看起来像"项目里没符号"
-                builder.AppendLine("提示：`type` 里的 `D` 表示「只看带 XML 文档注释的符号」；去掉 `D` 即列出全部种类。");
-            }
-
             return builder.ToString();
         }
 

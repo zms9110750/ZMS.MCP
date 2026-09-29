@@ -1,4 +1,6 @@
 using System.Reflection;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Xunit;
 using ZMS.MCP.Csharp.Roslyn;
 using ZMS.MCP.Csharp.Tools;
@@ -57,7 +59,7 @@ public sealed class SymbolQueryTests
     {
         Assert.Equal(
             SymbolKinds.Namespace | SymbolKinds.Class | SymbolKinds.Struct | SymbolKinds.Interface
-            | SymbolKinds.Property | SymbolKinds.Field | SymbolKinds.Event | SymbolKinds.Method | SymbolKinds.Document,
+            | SymbolKinds.Property | SymbolKinds.Field | SymbolKinds.Event | SymbolKinds.Method | SymbolKinds.Delegate,
             SymbolFilterParser.ParseKinds("NCSIPFEMD"));
     }
 
@@ -75,6 +77,57 @@ public sealed class SymbolQueryTests
         Assert.Equal(SymbolFilterParser.ParseKinds("c"), SymbolFilterParser.ParseKinds("C"));
         Assert.Equal(SymbolKinds.None, SymbolFilterParser.ParseKinds("xyz"));
         Assert.Equal(SymbolKinds.None, SymbolFilterParser.ParseKinds(""));
+    }
+
+    [Fact]
+    public void ParseKinds_maps_D_to_delegate()
+    {
+        // v4：D 从"只看带文档注释的"回收给委托
+        Assert.Equal(SymbolKinds.Delegate, SymbolFilterParser.ParseKinds("D"));
+        Assert.True(SymbolKinds.All.HasFlag(SymbolKinds.Delegate));
+    }
+
+    /// <summary>只为参数类型匹配建一个最小编译单元，不碰真实项目。</summary>
+    private static CSharpCompilation CompileProbe(string source)
+    {
+        return CSharpCompilation.Create(
+            "Probe",
+            [CSharpSyntaxTree.ParseText(source)],
+            [MetadataReference.CreateFromFile(typeof(object).Assembly.Location)],
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+    }
+
+    [Fact]
+    public void TypeMatches_handles_arrays_generics_aliases_and_nullable_annotations()
+    {
+        IMethodSymbol method = CompileProbe("""
+            namespace Demo;
+            public class Holder
+            {
+                public void Take(string[] items, System.Collections.Generic.List<int> list, string? text) { }
+            }
+            """)
+            .GetTypeByMetadataName("Demo.Holder")!
+            .GetMembers("Take")
+            .OfType<IMethodSymbol>()
+            .Single();
+
+        // 数组：type.Name 对数组是空串，所以这条以前一定匹配不上
+        Assert.True(SymbolLocator.TypeMatches("string[]", method.Parameters[0].Type));
+        Assert.True(SymbolLocator.TypeMatches("System.String[]", method.Parameters[0].Type));
+        Assert.False(SymbolLocator.TypeMatches("string", method.Parameters[0].Type));
+
+        // 泛型：简名、全名、BCL 名三种写法都认
+        Assert.True(SymbolLocator.TypeMatches("List<int>", method.Parameters[1].Type));
+        Assert.True(SymbolLocator.TypeMatches("System.Collections.Generic.List<int>", method.Parameters[1].Type));
+        Assert.True(SymbolLocator.TypeMatches("List<Int32>", method.Parameters[1].Type));
+        Assert.False(SymbolLocator.TypeMatches("List<string>", method.Parameters[1].Type));
+
+        // 可空标注不算签名的一部分；关键字和 BCL 名也对得上
+        Assert.True(SymbolLocator.TypeMatches("string?", method.Parameters[2].Type));
+        Assert.True(SymbolLocator.TypeMatches("string", method.Parameters[2].Type));
+        Assert.True(SymbolLocator.TypeMatches("String", method.Parameters[2].Type));
+        Assert.False(SymbolLocator.TypeMatches("int", method.Parameters[2].Type));
     }
 
     [Fact]
@@ -215,24 +268,6 @@ public sealed class SymbolQueryTests
         Assert.All(
             entries,
             entry => Assert.Single(((Microsoft.CodeAnalysis.IMethodSymbol)entry.Symbol).Parameters));
-    }
-
-    [Fact]
-    public void List_documented_only_lists_symbols_with_xml_docs()
-    {
-        // D：只列带 XML 文档注释的符号（Program.cs 的顶层语句没有注释，不该出现）
-        LoadedProject project = LoadSelf();
-
-        IReadOnlyList<SymbolEntry> entries = SymbolQuery.List(
-            project.Compilation,
-            SymbolKinds.Document,
-            SymbolModifiers.None,
-            []);
-
-        Assert.NotEmpty(entries);
-        Assert.All(
-            entries,
-            entry => Assert.False(string.IsNullOrWhiteSpace(entry.Symbol.GetDocumentationCommentXml())));
     }
 
     [Obsolete("这条拿仓库自身项目（真实 MSBuild 求值）来验符号列表，属靠别人的命令测自己；要保留就该改用临时项目，暂时停用")]

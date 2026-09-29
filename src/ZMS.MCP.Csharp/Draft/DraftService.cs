@@ -904,7 +904,7 @@ public static class DraftService
                 string nestedDirectory = Path.GetDirectoryName(outerFile) ?? info.ProjectDirectory;
                 // 需求：内部类用 Outer.Inner.cs 作文件名
                 string nestedPath = Path.Combine(nestedDirectory, $"{outer.Name}.{typeName}.cs");
-                return new CodeChange(nestedPath, BuildNestedTypeSource(outer, typeName, content), 0, 0, "新建内部类");
+                return new CodeChange(nestedPath, BuildNestedTypeSource(outer, content), 0, 0, "新建内部类");
             }
         }
 
@@ -922,13 +922,19 @@ public static class DraftService
 
         return new CodeChange(
             Path.Combine(targetDirectory, typeName + ".cs"),
-            BuildTypeSource(namespaceName, typeName, content),
+            BuildTypeSource(namespaceName, content),
             0,
             0,
             "新建类型");
     }
 
-    private static string BuildTypeSource(string namespaceName, string typeName, string content)
+    /// <summary>
+    /// 拼出新建类型的文件内容：文件级命名空间 + <c>content</c> 本身。
+    /// <c>content</c> 是**完整的类型声明**（含修饰符、特性、基类、<c>partial</c>），
+    /// 所以这里不再套一层 <c>public class</c> —— 否则
+    /// <c>[McpServerToolType] public static class X</c> 这种声明会被包成一团拼不出来的东西。
+    /// </summary>
+    private static string BuildTypeSource(string namespaceName, string content)
     {
         StringBuilder builder = new();
         if (namespaceName.Length > 0)
@@ -937,10 +943,7 @@ public static class DraftService
             builder.AppendLine();
         }
 
-        builder.AppendLine($"public class {typeName}");
-        builder.AppendLine("{");
-        builder.AppendLine(Indent(content, "    "));
-        builder.AppendLine("}");
+        builder.AppendLine(content);
         return builder.ToString();
     }
 
@@ -948,7 +951,7 @@ public static class DraftService
     /// 内部类：新文件里从最外层到宿主类都写一遍（都带 <c>partial</c>），
     /// 这样「外部类用 partial 定义」的规则在新文件里也成立；修饰符照抄原声明（访问级别必须一致）。
     /// </summary>
-    private static string BuildNestedTypeSource(INamedTypeSymbol outer, string typeName, string content)
+    private static string BuildNestedTypeSource(INamedTypeSymbol outer, string content)
     {
         List<INamedTypeSymbol> chain = [];
         for (INamedTypeSymbol? current = outer; current != null; current = current.ContainingType)
@@ -977,10 +980,8 @@ public static class DraftService
             indent += "    ";
         }
 
-        builder.AppendLine($"{indent}public class {typeName}");
-        builder.AppendLine($"{indent}{{");
-        builder.AppendLine(Indent(content, indent + "    "));
-        builder.AppendLine($"{indent}}}");
+        // content 是这一层的**完整类型声明**（含修饰符、特性），直接内缩进来，不再套 public class
+        builder.AppendLine(Indent(content, indent));
 
         for (int index = chain.Count - 1; index >= 0; index--)
         {
@@ -1014,19 +1015,20 @@ public static class DraftService
         return declaration.Modifiers.Any(modifier => modifier.IsKind(SyntaxKind.PartialKeyword));
     }
 
-    /// <summary>在访问修饰符之后插入 <c>partial</c>（写成 <c>public partial class</c>，不是 <c>public class partial</c>）。</summary>
+    /// <summary>
+    /// 在**所有修饰符之后**、类型关键字之前插入 <c>partial</c>。
+    /// C# 要求 <c>partial</c> 紧邻类型关键字，所以 <c>public sealed class</c> 必须变成
+    /// <c>public sealed partial class</c>（如果插在访问修饰符后面就会得到
+    /// <c>public partial sealed class</c>，那是 CS0267）。
+    /// </summary>
     private static TypeDeclarationSyntax AddPartial(TypeDeclarationSyntax declaration)
     {
         List<SyntaxToken> modifiers = [.. declaration.Modifiers];
-        int index = 0;
-        while (index < modifiers.Count && IsAccessModifier(modifiers[index]))
-        {
-            index++;
-        }
 
-        // 关键字要在访问修饰符之后、class 之前；带上尾随空格，避免拼出 "partialclass"
+        // 插在末尾 —— 即紧邻 class / struct / interface / record；
+        // 带上尾随空格，避免拼出 "partialclass"
         SyntaxToken partial = SyntaxFactory.Token(SyntaxKind.PartialKeyword).WithTrailingTrivia(SyntaxFactory.Space);
-        modifiers.Insert(index, partial);
+        modifiers.Insert(modifiers.Count, partial);
         return declaration.WithModifiers(SyntaxFactory.TokenList(modifiers));
     }
 

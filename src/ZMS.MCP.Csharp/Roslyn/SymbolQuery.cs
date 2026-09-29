@@ -3,14 +3,15 @@ using Microsoft.CodeAnalysis;
 namespace ZMS.MCP.Csharp.Roslyn;
 
 /// <summary>
-/// 符号种类。字母取自需求文档的 <c>NCSIPFEMD</c>：
-/// N 命名空间、C 类型（class）、S 结构、I 接口、P 属性、F 字段、E 事件、M 方法、D 文档注释。
+/// 符号种类。字母取自 <c>NCSITPFEMD</c>：
+/// N 命名空间、C 类型（class）、S 结构、I 接口、T 三种类型、P 属性、F 字段、E 事件、M 方法、D 委托。
 ///
 /// 说明：
 /// - 文档写的是 <c>NCSIPFED</c>（没有 M）；方法显然要能列，这里补上 M。
-/// - 文档注释那边的 <c>T</c>（类型）在这里展开成 C|S|I（源码能分辨 class/struct/interface）。
-/// - <c>D</c> 不是一种"种类"，而是过滤开关：给了它就只列**带 XML 文档注释**的符号；
-///   只给 D（不给别的字母）时按"所有种类"处理。
+/// - <c>T</c>（类型）展开成 C|S|I（源码能分辨 class/struct/interface）。
+/// - <c>D</c> 以前是"只看带 XML 文档注释的"这种过滤开关，现在那个能力搬去了 `symbols` 的 `documentation`
+///   信息开关；<c>D</c> 回收给**委托**（delegate 是 INamedTypeSymbol 且 TypeKind.Delegate，
+///   独立于 class / struct / interface 之外）。
 /// </summary>
 [Flags]
 public enum SymbolKinds
@@ -24,8 +25,8 @@ public enum SymbolKinds
     Field = 1 << 5,
     Event = 1 << 6,
     Method = 1 << 7,
-    Document = 1 << 8,
-    All = Namespace | Class | Struct | Interface | Property | Field | Event | Method,
+    Delegate = 1 << 8,
+    All = Namespace | Class | Struct | Interface | Property | Field | Event | Method | Delegate,
 }
 
 /// <summary>
@@ -134,7 +135,7 @@ public static class SymbolFilterParser
                     kinds |= SymbolKinds.Method;
                     break;
                 case 'D':
-                    kinds |= SymbolKinds.Document;
+                    kinds |= SymbolKinds.Delegate;
                     break;
             }
         }
@@ -260,8 +261,7 @@ public static class SymbolQuery
     private sealed record QueryFilter(
         SymbolKinds Kinds,
         SymbolModifiers Modifiers,
-        IReadOnlyList<string> ArgumentTypes,
-        bool DocumentedOnly);
+        IReadOnlyList<string> ArgumentTypes);
 
     public static IReadOnlyList<SymbolEntry> List(
         Compilation compilation,
@@ -269,15 +269,9 @@ public static class SymbolQuery
         SymbolModifiers modifiers,
         IReadOnlyList<string> argumentTypes)
     {
-        // D 是"只看有文档注释的"开关，不参与种类判断
-        bool documentedOnly = kinds.HasFlag(SymbolKinds.Document);
-        SymbolKinds effectiveKinds = kinds & ~SymbolKinds.Document;
-        if (effectiveKinds == SymbolKinds.None)
-        {
-            effectiveKinds = SymbolKinds.All;
-        }
+        SymbolKinds effectiveKinds = kinds == SymbolKinds.None ? SymbolKinds.All : kinds;
 
-        QueryFilter filter = new(effectiveKinds, modifiers, argumentTypes, documentedOnly);
+        QueryFilter filter = new(effectiveKinds, modifiers, argumentTypes);
         List<SymbolEntry> entries = [];
         CollectNamespace(compilation.Assembly.GlobalNamespace, entries, filter);
 
@@ -303,8 +297,7 @@ public static class SymbolQuery
             filter.Kinds.HasFlag(SymbolKinds.Namespace) &&
             IsInSource(@namespace) &&
             !emptyContainer &&
-            MatchesModifiers(@namespace, filter.Modifiers) &&
-            MatchesDocumented(@namespace, filter))
+            MatchesModifiers(@namespace, filter.Modifiers))
         {
             entries.Add(Create(@namespace));
         }
@@ -330,8 +323,7 @@ public static class SymbolQuery
 
         if (MatchesTypeKind(type, filter.Kinds) &&
             MatchesModifiers(type, filter.Modifiers) &&
-            filter.ArgumentTypes.Count == 0 &&
-            MatchesDocumented(type, filter))
+            filter.ArgumentTypes.Count == 0)
         {
             entries.Add(Create(type));
         }
@@ -345,7 +337,6 @@ public static class SymbolQuery
 
             if (!MatchesMemberKind(member, filter.Kinds) ||
                 !MatchesModifiers(member, filter.Modifiers) ||
-                !MatchesDocumented(member, filter) ||
                 !MatchesArguments(member, filter.ArgumentTypes))
             {
                 continue;
@@ -367,9 +358,9 @@ public static class SymbolQuery
             TypeKind.Class => kinds.HasFlag(SymbolKinds.Class),
             TypeKind.Struct => kinds.HasFlag(SymbolKinds.Struct),
             // 枚举跟着 S 走：S 在这个工具里表示"值类型"，enum 也是值类型。
-            // delegate 不参与类型过滤（用户明确：不要）。
             TypeKind.Enum => kinds.HasFlag(SymbolKinds.Struct),
             TypeKind.Interface => kinds.HasFlag(SymbolKinds.Interface),
+            TypeKind.Delegate => kinds.HasFlag(SymbolKinds.Delegate),
             _ => false,
         };
     }
@@ -384,17 +375,6 @@ public static class SymbolQuery
             IMethodSymbol => kinds.HasFlag(SymbolKinds.Method),
             _ => false,
         };
-    }
-
-    /// <summary>D：只保留带 XML 文档注释的符号。</summary>
-    private static bool MatchesDocumented(ISymbol symbol, QueryFilter filter)
-    {
-        if (!filter.DocumentedOnly)
-        {
-            return true;
-        }
-
-        return !string.IsNullOrWhiteSpace(symbol.GetDocumentationCommentXml());
     }
 
     private static bool MatchesModifiers(ISymbol symbol, SymbolModifiers modifiers)

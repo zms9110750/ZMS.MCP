@@ -563,13 +563,19 @@ public sealed class DraftLayerTests
         ProjectFileInfo info = ProjectFileInfo.Read(project);
         CSharpCompilation compilation = Compile("namespace Demo;\npublic class Class1 { }\n", Path.Combine(root, "Class1.cs"));
 
-        CodeChange change = DraftService.CreateNewType(info, compilation, "Demo.NewType", "public int Value { get; set; }");
+        // content 是**完整的类型声明**（v4 起不再由工具代套一层 public class）
+        CodeChange change = DraftService.CreateNewType(
+            info,
+            compilation,
+            "Demo.NewType",
+            "public class NewType\n{\n    public int Value { get; set; }\n}");
 
         Assert.Equal("NewType.cs", Path.GetFileName(change.FilePath));
         Assert.Equal(
             Path.GetFullPath(root),
             Path.GetFullPath(Path.GetDirectoryName(change.FilePath)!));
         Assert.Contains("public class NewType", change.NewContent, StringComparison.Ordinal);
+        Assert.Contains("public int Value { get; set; }", change.NewContent, StringComparison.Ordinal);
     }
 
     // ───────── partial 补全 ─────────
@@ -618,6 +624,36 @@ public sealed class DraftLayerTests
         Assert.Contains("partial class Plain", change.NewContent, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("public static class Shell")]
+    [InlineData("internal sealed class Shell")]
+    [InlineData("public abstract class Shell")]
+    [InlineData("public static partial class Shell")]
+    public void EnsurePartial_puts_partial_right_before_the_type_keyword(string declaration)
+    {
+        // C# 要求 partial 紧邻类型关键字：public sealed partial class 合法，
+        // public partial sealed class 是 CS0267。
+        string root = NewTempDirectory();
+        string file = Path.Combine(root, "Shell.cs");
+        string source = $"namespace Demo;\n{declaration}\n{{\n}}\n";
+        File.WriteAllText(file, source);
+        INamedTypeSymbol type = Compile(source, file).GetTypeByMetadataName("Demo.Shell")!;
+
+        if (declaration.Contains("partial", StringComparison.Ordinal))
+        {
+            Assert.Empty(DraftService.EnsurePartial(type));
+            return;
+        }
+
+        CodeChange change = Assert.Single(DraftService.EnsurePartial(type));
+
+        Assert.EndsWith("partial class Shell", change.NewContent.Replace("\r\n", "\n").TrimEnd('\n', '{', '}', ' ', '\t'), StringComparison.Ordinal);
+        Assert.Contains("partial class Shell", change.NewContent, StringComparison.Ordinal);
+        Assert.DoesNotContain("partial static class", change.NewContent, StringComparison.Ordinal);
+        Assert.DoesNotContain("partial sealed class", change.NewContent, StringComparison.Ordinal);
+        Assert.DoesNotContain("partial abstract class", change.NewContent, StringComparison.Ordinal);
+    }
+
     // ───────── 新建类型的文件定位 ─────────
 
     [Fact]
@@ -638,7 +674,11 @@ public sealed class DraftLayerTests
         File.WriteAllText(existing, source);
         ProjectFileInfo info = ProjectFileInfo.Read(project);
 
-        CodeChange change = DraftService.CreateNewType(info, Compile(source, existing), "Demo.Feature.Widget", "public void Run() { }");
+        CodeChange change = DraftService.CreateNewType(
+            info,
+            Compile(source, existing),
+            "Demo.Feature.Widget",
+            "public class Widget\n{\n    public void Run() { }\n}");
 
         // RootNamespace 之后的部分变成目录层级
         Assert.Equal(Path.Combine(root, "Feature", "Widget.cs"), change.FilePath);
@@ -659,13 +699,37 @@ public sealed class DraftLayerTests
         File.WriteAllText(outerFile, source);
         ProjectFileInfo info = ProjectFileInfo.Read(project);
 
-        CodeChange change = DraftService.CreateNewType(info, Compile(source, outerFile), "Demo.Outer.Inner", "public void Run() { }");
+        CodeChange change = DraftService.CreateNewType(
+            info,
+            Compile(source, outerFile),
+            "Demo.Outer.Inner",
+            "public class Inner\n{\n    public void Run() { }\n}");
 
         // 内部类用 Outer.Inner.cs，外层在新文件里以 partial 出现
         Assert.Equal(Path.Combine(root, "Outer.Inner.cs"), change.FilePath);
         Assert.Contains("public partial class Outer", change.NewContent, StringComparison.Ordinal);
         Assert.Contains("public class Inner", change.NewContent, StringComparison.Ordinal);
         Assert.Equal("新建内部类", change.Action);
+    }
+
+    [Fact]
+    public void CreateNewType_writes_the_declaration_verbatim()
+    {
+        // v4：content 就是完整的类型声明，工具不再代套 public class ——
+        // 否则 [McpServerToolType] public static class 这种声明会被包成拼不出来的东西。
+        string root = NewTempDirectory();
+        string project = Path.Combine(root, "Demo.csproj");
+        File.WriteAllText(project, "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><RootNamespace>Demo</RootNamespace></PropertyGroup></Project>");
+        ProjectFileInfo info = ProjectFileInfo.Read(project);
+        CSharpCompilation compilation = Compile("namespace Demo;\npublic class Existing { }\n", Path.Combine(root, "Existing.cs"));
+
+        string declaration = "[McpServerToolType]\npublic static partial class Tools\n{\n    public static string Ping() => \"pong\";\n}";
+
+        CodeChange change = DraftService.CreateNewType(info, compilation, "Demo.Tools", declaration);
+
+        Assert.Contains("namespace Demo;", change.NewContent, StringComparison.Ordinal);
+        Assert.Contains(declaration, change.NewContent, StringComparison.Ordinal);
+        Assert.DoesNotContain("public class Tools\n{\n    [McpServerToolType]", change.NewContent, StringComparison.Ordinal);
     }
 
     [Fact]
