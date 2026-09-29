@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Description>ZMS.MCP.Structured — path-addressed read and write for structured documents over MCP</Description>
+    <RootNamespace>ZMS.MCP.Structured</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.12" />
+    <PackageReference Include="Tomlyn" Version="2.10.1" />
+    <PackageReference Include="YamlDotNet" Version="18.1.0" />
+  </ItemGroup>
+
+  <!-- 项目级 using：stage_draft 写的类型文件带不了 using（content 被拼在 namespace 之后），需要的命名空间在这里引入。
+       gbk / gb18030 这类代码页在 net10.0 里已经内置（System.Text.Encoding.CodePages 不用显式引，引了会报 NU1510）。 -->
+  <ItemGroup>
+    <Using Include="System.Globalization" />
+    <Using Include="System.Runtime.CompilerServices" />
+    <Using Include="System.Security.Cryptography" />
+    <Using Include="System.Text" />
+    <Using Include="System.Text.Json" />
+    <Using Include="System.Text.Json.Nodes" />
+    <Using Include="System.Xml.Linq" />
+    <Using Include="System.Xml.XPath" />
+    <Using Include="Tomlyn" />
+    <Using Include="Tomlyn.Model" />
+    <Using Include="YamlDotNet.Core" />
+    <Using Include="YamlDotNet.Core.Events" />
+    <Using Include="YamlDotNet.Serialization" />
+    <Using Include="ZMS.MCP.Structured.Formats" />
+  </ItemGroup>
+
+</Project>
