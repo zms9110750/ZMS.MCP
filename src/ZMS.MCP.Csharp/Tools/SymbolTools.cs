@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Text;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using ModelContextProtocol.Server;
 using ZMS.MCP.Csharp.Draft;
 using ZMS.MCP.Csharp.Project;
@@ -22,45 +23,75 @@ public static class SymbolTools
 {
     [McpServerTool(ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
-        "One symbol tool with two modes: list symbols, or read a symbol. " +
+        "One symbol tool with two layers of switches: the first four pick WHICH symbols to list, " +
+        "the last four pick WHAT to print for each of them. " +
         "path empty = list the symbols declared in the project's own source (referenced assemblies are excluded); " +
+        "'Ns.Type' = only that type's members; 'Ns.Type.Member(...)' = that one member, with signature, file, line range and source; " +
+        "append '.get' / '.set' / '.add' / '.remove' to a member path to match one accessor exactly. " +
+        "Filters: " +
         "type = letters from NCSITPFEMD (N namespace, C class, S struct, I interface, T the three type kinds, P property, F field, E event, M method, D delegate); empty = all; " +
         "modifier = comma separated public / internal / protected / private / static / const / abstract / readonly / virtual / override, every given condition must match; " +
         "argsList = comma separated parameter types, when set only methods with exactly those parameter types are listed; " +
         "nameFilter = case-insensitive substring filter on the fully qualified name. " +
-        "path = 'Ns.Type': read=false lists that type's members with file and line, read=true shows the type structure (member bodies stay hidden); " +
-        "path = 'Ns.Type.Member' or 'Ns.Type.Method(int,string)' ignores read and shows that member's signature, file, line range and source; " +
-        "append '.get' / '.set' / '.add' / '.remove' to that member path to match one accessor exactly (then its implementation is shown). " +
+        "Per-symbol output: " +
+        "documentation = also print each symbol's XML doc comment; " +
+        "attributes = also print each symbol's attributes; " +
+        "references = also print who references each symbol (symbols only, never file positions - ask again with the member path if you need a position); " +
+        "implementation = also print each symbol's implementation. " +
         "When the symbol has a pending draft the output also prints its draft view, and on an unresolved conflict it returns an in-memory selectCookie for select_draft (each call rotates that cookie; nothing is written).")]
     public static string Symbols(
         [Description("Path to the .csproj")] string csprojPath,
-        [Description("Empty = list project symbols; 'Ns.Type' = that type; 'Ns.Type.Member(...)' = that member")] string path = "",
-        [Description("true = read structure/source instead of listing (only used when path is a type)")] bool read = false,
+        [Description("Empty = list project symbols; 'Ns.Type' = that type's members; 'Ns.Type.Member(...)' = that member")] string path = "",
         [Description("Type letters, e.g. 'C' or 'NCSITPFEMD'. Empty = all")] string type = "",
         [Description("Modifier filter, e.g. 'public,static'. Empty = no filter")] string modifier = "",
         [Description("Method parameter types, e.g. 'string,int'. Empty = no filter")] string argsList = "",
-        [Description("Case-insensitive substring filter on the fully qualified name. Empty = no filter")] string nameFilter = "")
+        [Description("Case-insensitive substring filter on the fully qualified name. Empty = no filter")] string nameFilter = "",
+        [Description("true = also print each symbol's XML doc comment")] bool documentation = false,
+        [Description("true = also print each symbol's attributes")] bool attributes = false,
+        [Description("true = also print who references each symbol (no file positions)")] bool references = false,
+        [Description("true = also print each symbol's implementation")] bool implementation = false)
     {
         return ToolGuard.Run(() =>
         {
+            SymbolView view = new(documentation, attributes, references, implementation);
             LoadedProject project = LoadedProject.Load(csprojPath);
             if (string.IsNullOrWhiteSpace(path))
             {
-                return ListProjectSymbols(project, type, modifier, argsList, nameFilter);
+                return ListProjectSymbols(project, type, modifier, argsList, nameFilter, view);
             }
 
-            return ReadOrListPath(project, csprojPath, path, read);
+            return ReadOrListPath(project, csprojPath, path, view);
         });
     }
 
+    /// <summary>每个符号要**额外列出**什么 —— 四个"要不要列出"的开关（不是筛选）。</summary>
+    private sealed record SymbolView(
+        bool Documentation,
+        bool Attributes,
+        bool References,
+        bool Implementation)
+    {
+        public bool Any
+        {
+            get
+            {
+                return Documentation || Attributes || References || Implementation;
+            }
+        }
+    }
+
     // ───────── 列：整个项目 ─────────
+
+    /// <summary>一次最多为多少个符号做引用扫描 —— 每查一个都要走一遍全部语法树，所以得有上限。</summary>
+    private const int ReferenceScanLimit = 20;
 
     private static string ListProjectSymbols(
         LoadedProject project,
         string type,
         string modifier,
         string argsList,
-        string nameFilter)
+        string nameFilter,
+        SymbolView view)
     {
         SymbolKinds kinds = SymbolFilterParser.ParseKinds(type);
         SymbolModifiers modifierFilter = SymbolFilterParser.ParseModifiers(
@@ -76,12 +107,20 @@ public static class SymbolTools
             entries = [.. entries.Where(entry => SymbolBaseline.Key(entry.Symbol).Contains(filter, StringComparison.OrdinalIgnoreCase))];
         }
 
+        if (view.References && entries.Count > ReferenceScanLimit)
+        {
+            throw new InvalidOperationException(
+                $"开了 references 的符号有 {entries.Count} 个，超过一次最多扫 {ReferenceScanLimit} 个的上限"
+                + "（每查一个符号都要遍历全部语法树）。先收窄范围：加 nameFilter、argsList，或者把 path 指到一个类型上。");
+        }
+
         StringBuilder builder = new();
         builder.AppendLine($"# {project.Info.ProjectPath}");
         AppendModeNotice(builder, project);
         builder.AppendLine(
             $"- TFM: `{project.Info.TargetFramework}` | 符号: {entries.Count}" +
-            $" | 过滤: type='{type}' modifier='{modifier}' args='{argsList}' nameFilter='{filter}'");
+            $" | 过滤: type='{type}' modifier='{modifier}' args='{argsList}' nameFilter='{filter}'" +
+            $" | 列出: {DescribeView(view)}");
         if (unknownKindLetters.Count > 0)
         {
             // 别静默吞掉拼错的字母 —— 否则"筛出来是空的"看起来就像"项目里没符号"
@@ -101,7 +140,7 @@ public static class SymbolTools
         {
             if (!string.Equals(currentNamespace, entry.Namespace, StringComparison.Ordinal))
             {
-                AppendSymbolSection(builder, namespaceSection, project);
+                AppendSymbolSection(builder, namespaceSection, project, view);
                 namespaceSection = [];
                 currentNamespace = entry.Namespace;
                 builder.AppendLine();
@@ -111,12 +150,43 @@ public static class SymbolTools
             namespaceSection.Add(entry);
         }
 
-        AppendSymbolSection(builder, namespaceSection, project);
+        AppendSymbolSection(builder, namespaceSection, project, view);
         return builder.ToString();
     }
 
+    /// <summary>四个开关的简短描述（写进表头，好让人知道这次列出的是哪些信息）。</summary>
+    private static string DescribeView(SymbolView view)
+    {
+        List<string> on = [];
+        if (view.Documentation)
+        {
+            on.Add("文档");
+        }
+
+        if (view.Attributes)
+        {
+            on.Add("特性");
+        }
+
+        if (view.References)
+        {
+            on.Add("被引用");
+        }
+
+        if (view.Implementation)
+        {
+            on.Add("实现");
+        }
+
+        return on.Count == 0 ? "（只有签名与位置）" : string.Join(" + ", on);
+    }
+
     /// <summary>一段（同一命名空间）里的符号行；按所属类型分层，并在同名重载超过 10 个时改分组显示。</summary>
-    private static void AppendSymbolSection(StringBuilder builder, IReadOnlyList<SymbolEntry> section, LoadedProject project)
+    private static void AppendSymbolSection(
+        StringBuilder builder,
+        IReadOnlyList<SymbolEntry> section,
+        LoadedProject project,
+        SymbolView view)
     {
         foreach (IGrouping<string, SymbolEntry> containerGroup in section.GroupBy(entry => entry.Container))
         {
@@ -138,6 +208,10 @@ public static class SymbolTools
                     foreach (SymbolEntry item in group)
                     {
                         builder.AppendLine($"{indent}  - `{MemberListRendering.ParameterList(item.Symbol)}`{Location(project, item.Symbol)}");
+                        if (view.Any)
+                        {
+                            AppendDetail(builder, project, indent + "    ", item.Symbol, view);
+                        }
                     }
 
                     continue;
@@ -146,35 +220,113 @@ public static class SymbolTools
                 foreach (SymbolEntry entry in group)
                 {
                     builder.AppendLine($"{indent}- `{entry.Signature}` ({entry.Kind}){container}{Location(project, entry.Symbol)}");
+                    if (view.Any)
+                    {
+                        AppendDetail(builder, project, indent + "  ", entry.Symbol, view);
+                    }
                 }
             }
         }
     }
 
+    /// <summary>按四个开关给一个符号补细节：文档注释 / 特性 / 被引用 / 实现。</summary>
+    private static void AppendDetail(StringBuilder builder, LoadedProject project, string indent, ISymbol symbol, SymbolView view)
+    {
+        if (view.Documentation)
+        {
+            string xml = (symbol.GetDocumentationCommentXml() ?? "").Trim();
+            builder.AppendLine($"{indent}文档：{(xml.Length == 0 ? "（无）" : "")}");
+            foreach (string line in xml.Replace("\r\n", "\n").Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            {
+                builder.AppendLine($"{indent}  {line.Trim()}");
+            }
+        }
+
+        if (view.Attributes)
+        {
+            IReadOnlyList<string> declared = AttributeTexts(symbol);
+            builder.AppendLine($"{indent}特性：{(declared.Count == 0 ? "（无）" : string.Join(" ", declared))}");
+        }
+
+        if (view.References)
+        {
+            IReadOnlyList<SymbolReferenceCount> hits = ReferenceFinder.Count(project.Compilation, symbol);
+            builder.AppendLine($"{indent}被这些引用：{(hits.Count == 0 ? "（无）" : "")}");
+            foreach (SymbolReferenceCount hit in hits)
+            {
+                builder.AppendLine($"{indent}  - `{hit.Type}.{hit.Member}` — {hit.Count} 次");
+            }
+        }
+
+        if (view.Implementation)
+        {
+            builder.AppendLine($"{indent}实现：");
+            foreach (string line in SourceTextOf(symbol).Replace("\r\n", "\n").Split('\n'))
+            {
+                builder.AppendLine($"{indent}  {line}");
+            }
+        }
+    }
+
+    /// <summary>符号声明上的特性文本（带方括号）；没有就返回空表。</summary>
+    private static IReadOnlyList<string> AttributeTexts(ISymbol symbol)
+    {
+        List<string> texts = [];
+        foreach (SyntaxReference reference in symbol.DeclaringSyntaxReferences)
+        {
+            if (reference.GetSyntax() is not MemberDeclarationSyntax declaration)
+            {
+                continue;
+            }
+
+            foreach (AttributeListSyntax list in declaration.AttributeLists)
+            {
+                string text = list.ToString().Replace("\r\n", " ").Replace("\n", " ").Trim();
+                if (text.Length > 0 && !texts.Contains(text, StringComparer.Ordinal))
+                {
+                    texts.Add(text);
+                }
+            }
+        }
+
+        return texts;
+    }
+
+    /// <summary>符号声明的源码（不带行号）；没有源码就说明原因。</summary>
+    private static string SourceTextOf(ISymbol symbol)
+    {
+        SyntaxNode? node = symbol.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax();
+        return node == null
+            ? "（没有源码声明：来自引用程序集或编译器生成）"
+            : CodeEditor.ReadSource(CodeEditor.DeclarationOf(node));
+    }
+
     // ───────── 列 / 读：一个类型或一个成员 ─────────
 
-    private static string ReadOrListPath(LoadedProject project, string csprojPath, string path, bool read)
+    private static string ReadOrListPath(LoadedProject project, string csprojPath, string path, SymbolView view)
     {
         ResolvedPath resolved = SymbolLocator.Resolve(project.Compilation, path);
         if (resolved.MemberSpec.Length > 0)
         {
-            // path 指到成员（含访问器）→ 读它（read 参数在这里没有意义）
+            // path 指到成员（含访问器）→ 读它（四个开关在这里没意义：本来就把源码给你了）
             ISymbol symbol = SymbolLocator.ResolveSingleMember(resolved.Type, resolved.MemberSpec);
             return ReadSymbol(project, csprojPath, symbol);
         }
 
-        return read
-            ? ReadType(project, csprojPath, resolved.Type)
-            : ListTypeMembers(project, resolved.Type);
+        return ListTypeMembers(project, csprojPath, resolved.Type, view);
     }
 
-    /// <summary>列一个类型的成员（完全限定名 + 位置），对应原来的 list_members。</summary>
-    private static string ListTypeMembers(LoadedProject project, INamedTypeSymbol type)
+    /// <summary>列一个类型的成员（签名 + 位置），对应原来的 list_members。</summary>
+    private static string ListTypeMembers(
+        LoadedProject project,
+        string csprojPath,
+        INamedTypeSymbol type,
+        SymbolView view)
     {
         StringBuilder builder = new();
         builder.AppendLine($"# {SymbolLocator.DisplayName(type)}  ({type.TypeKind.ToString().ToLowerInvariant()})");
         AppendModeNotice(builder, project);
-        builder.AppendLine($"- TFM: `{project.Info.TargetFramework}`");
+        builder.AppendLine($"- TFM: `{project.Info.TargetFramework}` | 列出: {DescribeView(view)}");
         builder.AppendLine();
         List<ISymbol> members = type.GetMembers()
             .Where(member => !member.IsImplicitlyDeclared && !IsAccessor(member))
@@ -187,6 +339,13 @@ public static class SymbolTools
             return builder.ToString();
         }
 
+        if (view.References && members.Count > ReferenceScanLimit)
+        {
+            throw new InvalidOperationException(
+                $"开了 references 的成员有 {members.Count} 个，超过一次最多扫 {ReferenceScanLimit} 个的上限"
+                + "（每查一个符号都要遍历全部语法树）。先收窄范围：把 path 指到具体成员上。");
+        }
+
         foreach (IReadOnlyList<ISymbol> group in MemberListRendering.GroupByName(members, member => member))
         {
             // 3.7：同名重载超过 10 个 → 分组显示（不重复方法名）
@@ -196,6 +355,10 @@ public static class SymbolTools
                 foreach (ISymbol member in group)
                 {
                     builder.AppendLine($"  - `{MemberListRendering.ParameterList(member)}`{Location(project, member)}");
+                    if (view.Any)
+                    {
+                        AppendDetail(builder, project, "    ", member, view);
+                    }
                 }
 
                 continue;
@@ -204,24 +367,14 @@ public static class SymbolTools
             foreach (ISymbol member in group)
             {
                 builder.AppendLine($"- `{member.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat)}`{Location(project, member)}");
+                if (view.Any)
+                {
+                    AppendDetail(builder, project, "  ", member, view);
+                }
             }
         }
 
-        return builder.ToString();
-    }
-
-    /// <summary>读一个类型的**结构**（方法只签名、属性/索引器的访问器只给记号、字段带初始化器）。</summary>
-    private static string ReadType(LoadedProject project, string csprojPath, INamedTypeSymbol type)
-    {
-        List<ISymbol> members =
-        [
-            .. type.GetMembers()
-                .Where(member => !member.IsImplicitlyDeclared && !IsAccessor(member)),
-        ];
-        (int documentedCount, int lineLimit) = CodeEditor.DocumentationBudget(members.Count);
-        HashSet<ISymbol> documented = CodeEditor.DocumentedMembers([.. members.Take(documentedCount)]);
-        string body = CodeEditor.DescribeType(type, documented, lineLimit);
-        return AppendModeNoticeLine(project, body) + AppendDraftView(project, csprojPath, type);
+        return builder.ToString() + AppendDraftView(project, csprojPath, type);
     }
 
     /// <summary>读一个符号：签名、位置与源码（不带文件路径定位）。</summary>

@@ -292,7 +292,7 @@ public sealed class SymbolQueryTests
     [Fact]
     public void Symbols_lists_like_the_old_list_symbols()
     {
-        string output = SymbolTools.Symbols(SelfProjectPath(), "", false, "C", "", "");
+        string output = SymbolTools.Symbols(SelfProjectPath(), "", "C", "", "");
 
         Assert.Contains("## ZMS.MCP.Csharp.Roslyn", output);
         Assert.Contains("- `class LoadedProject`", output);
@@ -303,7 +303,7 @@ public sealed class SymbolQueryTests
         Assert.Contains("\n  - `class ", output);
 
         // 列成员时：成员行两格缩进（正向断言，不只看"没出现"）
-        string withMembers = SymbolTools.Symbols(SelfProjectPath(), "", false, "M", "", "");
+        string withMembers = SymbolTools.Symbols(SelfProjectPath(), "", "M", "", "");
         Assert.Contains("\n  - `", withMembers);
         Assert.Contains("` (method)", withMembers);
     }
@@ -311,7 +311,7 @@ public sealed class SymbolQueryTests
     [Fact]
     public void Symbols_warns_about_unknown_kind_letters()
     {
-        string output = SymbolTools.Symbols(SelfProjectPath(), "", false, "Cx", "", "");
+        string output = SymbolTools.Symbols(SelfProjectPath(), "", "Cx", "", "");
 
         Assert.Contains("无法识别的 type 字母", output);
         Assert.Contains("X", output);
@@ -321,21 +321,21 @@ public sealed class SymbolQueryTests
     public void Symbols_filters_by_name_letters_and_modifiers()
     {
         // nameFilter = 原来 list_types 的 filter；type = T 只列类型
-        string types = SymbolTools.Symbols(SelfProjectPath(), "", false, "T", "", "", "LoadedProject");
+        string types = SymbolTools.Symbols(SelfProjectPath(), "", "T", "", "", "LoadedProject");
 
         Assert.Contains("LoadedProject", types);
         Assert.Contains("nameFilter='LoadedProject'", types);
         Assert.DoesNotContain("` (method)", types);
 
-        string publics = SymbolTools.Symbols(SelfProjectPath(), "", false, "C", "public,static", "");
+        string publics = SymbolTools.Symbols(SelfProjectPath(), "", "C", "public,static", "");
 
         Assert.Contains("符号: ", publics);
     }
 
     [Fact]
-    public void Symbols_lists_a_types_members_when_read_is_false()
+    public void Symbols_lists_a_types_members()
     {
-        string output = SymbolTools.Symbols(SelfProjectPath(), "ZMS.MCP.Csharp.Draft.DraftEdit", read: false);
+        string output = SymbolTools.Symbols(SelfProjectPath(), "ZMS.MCP.Csharp.Draft.DraftEdit");
 
         Assert.Contains("# ZMS.MCP.Csharp.Draft.DraftEdit", output);
         // 成员列表带文件与行号
@@ -344,15 +344,40 @@ public sealed class SymbolQueryTests
     }
 
     [Fact]
-    public void Symbols_reads_a_type_structure_without_member_bodies()
+    public void Symbols_can_also_print_implementation_and_attributes()
     {
-        string output = SymbolTools.Symbols(SelfProjectPath(), "ZMS.MCP.Csharp.Draft.SymbolBaseline", read: true);
+        // 四个"要不要列出"的开关：默认什么都不加，开了才加
+        string plain = SymbolTools.Symbols(SelfProjectPath(), "ZMS.MCP.Csharp.Draft.DraftEdit");
+        Assert.DoesNotContain("实现：", plain);
+        Assert.DoesNotContain("特性：", plain);
+        // 表头要说明这次列出的是哪些信息
+        Assert.Contains("列出: ", plain);
 
-        Assert.Contains("## ", output);
-        Assert.Contains("### Members", output);
-        // 结构视图：方法只给签名、访问器只给记号
-        Assert.Contains("Capture(Compilation compilation)", output);
-        Assert.DoesNotContain("return baseline;", output);
+        string detailed = SymbolTools.Symbols(
+            SelfProjectPath(),
+            "ZMS.MCP.Csharp.Draft.DraftEdit",
+            implementation: true,
+            attributes: true);
+
+        Assert.Contains("实现：", detailed);
+        Assert.Contains("特性：", detailed);
+        // 开了开关就真把实现体给出来，而不只是加个标题
+        Assert.Contains("RequestedContent", detailed);
+    }
+
+    [Fact]
+    public void Symbols_can_print_who_references_a_symbol()
+    {
+        // references 给的是"哪个类的哪个成员"，**不给文件位置**。
+        // 注意它作用在**列出**模式上：path 指到具体成员时走的是"读这个成员"，本来就把源码给你了。
+        string output = SymbolTools.Symbols(
+            SelfProjectPath(),
+            "ZMS.MCP.Csharp.Draft.SymbolBaseline",
+            references: true);
+
+        Assert.Contains("被这些引用：", output);
+        // SymbolBaseline 的成员在本仓库里确实被用着，所以至少该有一条带次数的记录
+        Assert.Matches(@"— \d+ 次", output);
     }
 
     [Fact]

@@ -161,7 +161,7 @@ public static class CodeEditor
     }
 
     /// <summary>把符号的声明节点上溯到"整个成员声明"：变量声明符 → 它所在的字段声明。</summary>
-    private static SyntaxNode DeclarationOf(SyntaxNode node)
+    internal static SyntaxNode DeclarationOf(SyntaxNode node)
     {
         if (node is MemberDeclarationSyntax)
         {
