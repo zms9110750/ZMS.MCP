@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace ZMS.MCP.Csharp.Draft;
 
@@ -15,8 +16,12 @@ public sealed record BaselineDiff(
 }
 
 /// <summary>
-/// 追踪基线：**符号级语义快照** —— 「符号完全限定名 → 声明文本 hash」。
+/// 追踪基线：**符号级语义快照** —— 「符号完全限定名 → 语义 hash」。
 /// 不含文件路径，所以**移动文件 / 文件改名不算变化**（见 `docs/Csharp-拟定流程v3.md` 第五节）。
+///
+/// hash 算的是**语义**不是文本：声明里的每个名字都先解析成符号、再写成规范身份，
+/// 所以 `List&lt;int&gt;` / `System.Collections.Generic.List&lt;int&gt;` / `using L = …; L&lt;int&gt;`
+/// 三种写法算出来是同一个值（using 与别名不参与），注释与空白这些 trivia 也不参与。
 /// </summary>
 public static class SymbolBaseline
 {
@@ -37,7 +42,10 @@ public static class SymbolBaseline
     public static Dictionary<string, string> Capture(Compilation compilation)
     {
         Dictionary<string, string> baseline = new(StringComparer.Ordinal);
-        CollectNamespace(compilation.Assembly.GlobalNamespace, baseline);
+
+        // 同一棵语法树只取一次 SemanticModel（很贵），整个遍历共用
+        Dictionary<SyntaxTree, SemanticModel> models = new();
+        CollectNamespace(compilation.Assembly.GlobalNamespace, baseline, compilation, models);
         return baseline;
     }
 
@@ -102,44 +110,6 @@ public static class SymbolBaseline
         }
     }
 
-    private static void CollectNamespace(INamespaceSymbol @namespace, Dictionary<string, string> baseline)
-    {
-        foreach (INamespaceSymbol child in @namespace.GetNamespaceMembers())
-        {
-            CollectNamespace(child, baseline);
-        }
-
-        foreach (INamedTypeSymbol type in @namespace.GetTypeMembers())
-        {
-            CollectType(type, baseline);
-        }
-    }
-
-    private static void CollectType(INamedTypeSymbol type, Dictionary<string, string> baseline)
-    {
-        if (type.IsImplicitlyDeclared)
-        {
-            return;
-        }
-
-        baseline[Key(type)] = DeclaredTextHash(type);
-
-        foreach (INamedTypeSymbol nested in type.GetTypeMembers())
-        {
-            CollectType(nested, baseline);
-        }
-
-        foreach (ISymbol member in type.GetMembers())
-        {
-            if (member.IsImplicitlyDeclared || IsAccessor(member))
-            {
-                continue;
-            }
-
-            baseline[Key(member)] = DeclaredTextHash(member);
-        }
-    }
-
     /// <summary>文本 → hash（快照比对用；与基线 hash 同一套"换行归一"规则）。</summary>
     internal static string HashText(string text)
     {
@@ -159,14 +129,148 @@ public static class SymbolBaseline
         return string.Join("\n---\n", parts);
     }
 
-    /// <summary>
-    /// 声明文本 hash：把一个符号的**全部声明**（分部类会有多份）取文本、换行归一后按序拼起来再哈希。
-    /// 归一换行是为了不让 CRLF/LF 变化误报成"被改"。
-    /// </summary>
-    private static string DeclaredTextHash(ISymbol symbol)
+    private static void CollectNamespace(
+        INamespaceSymbol @namespace,
+        Dictionary<string, string> baseline,
+        Compilation compilation,
+        Dictionary<SyntaxTree, SemanticModel> models)
     {
-        return Convert.ToHexString(
-            SHA256.HashData(Encoding.UTF8.GetBytes(Normalize(DeclaredText(symbol)))));
+        foreach (INamespaceSymbol child in @namespace.GetNamespaceMembers())
+        {
+            CollectNamespace(child, baseline, compilation, models);
+        }
+
+        foreach (INamedTypeSymbol type in @namespace.GetTypeMembers())
+        {
+            CollectType(type, baseline, compilation, models);
+        }
+    }
+
+    private static void CollectType(
+        INamedTypeSymbol type,
+        Dictionary<string, string> baseline,
+        Compilation compilation,
+        Dictionary<SyntaxTree, SemanticModel> models)
+    {
+        if (type.IsImplicitlyDeclared)
+        {
+            return;
+        }
+
+        baseline[Key(type)] = SemanticHash(type, compilation, models);
+
+        foreach (INamedTypeSymbol nested in type.GetTypeMembers())
+        {
+            CollectType(nested, baseline, compilation, models);
+        }
+
+        foreach (ISymbol member in type.GetMembers())
+        {
+            if (member.IsImplicitlyDeclared || IsAccessor(member))
+            {
+                continue;
+            }
+
+            baseline[Key(member)] = SemanticHash(member, compilation, models);
+        }
+    }
+
+    /// <summary>
+    /// 语义 hash：符号身份 + 它每一处声明的「名字都换成符号身份」的规范文本。
+    ///
+    /// 比纯文本比对**细**（语句、顺序、字面量都还在，所以不会漏报"真被改了"），
+    /// 但把 using / 别名 / 简称带来的写法差异抹平了（那些解析到**同一个符号**，算出来同一个值）。
+    /// </summary>
+    private static string SemanticHash(
+        ISymbol symbol,
+        Compilation compilation,
+        Dictionary<SyntaxTree, SemanticModel> models)
+    {
+        StringBuilder builder = new();
+        builder.Append(SymbolIdentity(symbol)).Append('\n');
+
+        List<SyntaxNode> declarations = [];
+        foreach (SyntaxReference reference in symbol.DeclaringSyntaxReferences)
+        {
+            declarations.Add(reference.GetSyntax());
+        }
+
+        declarations.Sort((left, right) => string.CompareOrdinal(left.ToString(), right.ToString()));
+        foreach (SyntaxNode declaration in declarations)
+        {
+            SyntaxTree tree = declaration.SyntaxTree;
+            if (!models.TryGetValue(tree, out SemanticModel? model))
+            {
+                model = compilation.GetSemanticModel(tree);
+                models[tree] = model;
+            }
+
+            AppendNormalized(builder, declaration, model);
+            builder.Append('\n');
+        }
+
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())));
+    }
+
+    /// <summary>
+    /// 把一个声明写成"名字都换成符号身份"的规范文本。
+    ///
+    /// 关键在**整棵子树只出一个身份**：遇到类型引用或名称引用就先序整棵替换，
+    /// 于是 `System.Collections.Generic.List&lt;int&gt;`、`List&lt;int&gt;`、`using L = …; L`
+    /// 三种写法得到同一个串。trivia（注释、空白）根本不参与。
+    /// </summary>
+    private static void AppendNormalized(StringBuilder builder, SyntaxNode node, SemanticModel model)
+    {
+        string? identity = IdentityOf(node, model);
+        if (identity != null)
+        {
+            builder.Append(identity).Append(' ');
+            return;
+        }
+
+        // 按序走子节点与子 token：`+` 这类**运算符是 token**，漏掉它 `a + b` 和 `a - b` 就分不出来了
+        foreach (SyntaxNodeOrToken item in node.ChildNodesAndTokens())
+        {
+            if (item.IsNode)
+            {
+                AppendNormalized(builder, item.AsNode()!, model);
+                continue;
+            }
+
+            SyntaxToken token = item.AsToken();
+            if (!token.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.EndOfFileToken))
+            {
+                builder.Append(token.Text).Append(' ');
+            }
+        }
+    }
+
+    /// <summary>这个节点整棵该被一个符号身份替代吗（类型引用 / 名称引用）；否则返回 null 继续往下走。</summary>
+    private static string? IdentityOf(SyntaxNode node, SemanticModel model)
+    {
+        if (node is TypeSyntax)
+        {
+            return model.GetTypeInfo(node).Type is { } type ? SymbolIdentity(type) : null;
+        }
+
+        if (node is NameSyntax)
+        {
+            ISymbol? symbol = model.GetSymbolInfo(node).Symbol ?? model.GetDeclaredSymbol(node);
+            return symbol == null ? null : SymbolIdentity(symbol);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// 符号的规范身份：优先用 XML 文档 ID（与 using / 别名 / 简称无关，`int` 与 `System.Int32` 同一个），
+    /// 取不到就退回显示名。一律用 <c>OriginalDefinition</c>，泛型实例与定义归一。
+    /// </summary>
+    private static string SymbolIdentity(ISymbol symbol)
+    {
+        ISymbol original = symbol.OriginalDefinition;
+        return original.GetDocumentationCommentId()
+            ?? "?" + original.ToDisplayString(IdentityFormat);
     }
 
     private static string Normalize(string text)
