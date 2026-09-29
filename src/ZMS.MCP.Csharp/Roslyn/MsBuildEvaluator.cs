@@ -150,7 +150,7 @@ public static class MsBuildEvaluator
     }
 
     /// <summary>递归枚举项目目录下的 <c>.cs</c>（跳过 <c>bin</c> / <c>obj</c>）。</summary>
-    private static IEnumerable<string> EnumerateSourceFiles(string directory)
+    internal static IEnumerable<string> EnumerateSourceFiles(string directory)
     {
         Stack<string> pending = new();
         pending.Push(directory);

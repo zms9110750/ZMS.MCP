@@ -314,6 +314,14 @@ public sealed class LoadedProject
     }
 
     /// <summary>
+    /// 会话级编译缓存：同一份源码状态只装配一次编译。
+    /// 键是项目路径，值是「编译 + 项目目录下所有 .cs 的文件数 / 最新写入时间」——
+    /// 时间戳一变就重装配，所以别人在拟定期间改了文件也看得见（不会拿着旧编译往下走）。
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, (LoadedProject Project, string Stamp)> SessionCache =
+        new(PathComparison.Comparer);
+
+    /// <summary>
     /// 加载项目：先问 MSBuild 要"项目的事实"（编译项 / 引用集 / 宏 / 语言选项），拿不到就降级。
     ///
     /// 只有"评估本身"失败才降级 —— 评估成功后装配 compilation 出错属于真问题，照实抛出，
@@ -323,7 +331,21 @@ public sealed class LoadedProject
     public static LoadedProject Load(string projectPath)
     {
         ProjectFileInfo info = ProjectFileInfo.Read(projectPath);
+        string stamp = SourceStamp(info);
 
+        if (SessionCache.TryGetValue(info.ProjectPath, out (LoadedProject Project, string Stamp) cached)
+            && string.Equals(cached.Stamp, stamp, StringComparison.Ordinal))
+        {
+            return cached.Project;
+        }
+
+        LoadedProject loaded = LoadCore(info);
+        SessionCache[info.ProjectPath] = (loaded, stamp);
+        return loaded;
+    }
+
+    private static LoadedProject LoadCore(ProjectFileInfo info)
+    {
         MsBuildEvaluation evaluation;
         try
         {
@@ -335,6 +357,27 @@ public sealed class LoadedProject
         }
 
         return Evaluated(info, evaluation);
+    }
+
+    /// <summary>项目目录下所有 <c>.cs</c> 的"文件数 + 最新写入时间"，用来判断会话缓存还能不能用。</summary>
+    private static string SourceStamp(ProjectFileInfo info)
+    {
+        int count = 0;
+        long latest = 0;
+        foreach (string file in MsBuildEvaluator.EnumerateSourceFiles(info.ProjectDirectory))
+        {
+            count++;
+            try
+            {
+                latest = Math.Max(latest, File.GetLastWriteTimeUtc(file).Ticks);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                // 读不到就只记数，不影响"有变化就重装配"的判断
+            }
+        }
+
+        return $"{count}:{latest}";
     }
 
     /// <summary>

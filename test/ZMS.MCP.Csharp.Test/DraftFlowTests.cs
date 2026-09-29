@@ -1,6 +1,7 @@
 using Xunit;
 using ZMS.MCP.Csharp.Draft;
 using ZMS.MCP.Csharp.Project;
+using ZMS.MCP.Csharp.Roslyn;
 
 namespace ZMS.MCP.Csharp.Test;
 
@@ -385,6 +386,50 @@ public sealed class DraftFlowTests
             Assert.Contains("定位不到符号", exception.Message, StringComparison.Ordinal);
             // 名字对得上、签名对不上的那些要摆出来，好让人看出是参数表写错了
             Assert.Contains("Add", exception.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            new DraftStore().ClearTracking(project);
+        }
+    }
+
+    [Fact]
+    public void Stage_reports_the_diagnostics_this_edit_would_add()
+    {
+        // 每加一条就在内存里报"这条让诊断多了什么" —— 不等 confirm_draft 才攒出来
+        string project = NewProject(out _);
+        try
+        {
+            string cookie = TrackAndTakeCookie(project);
+            string clean = DraftService.Stage(cookie, "Demo.Class1", "Sub", "public static int Sub(int a, int b) { return a - b; }");
+
+            Assert.Contains("这条改动带来的诊断变化", clean, StringComparison.Ordinal);
+
+            // 第二条引用一个不存在的成员：当场就该报出编译错误，而不是等预检
+            string broken = DraftService.Stage(cookie, "Demo.Class1", "Bad", "public static int Bad() { return NotExist.Value; }");
+
+            Assert.Contains("这条改动带来的诊断变化", broken, StringComparison.Ordinal);
+            Assert.Contains("CS", broken, StringComparison.Ordinal);
+        }
+        finally
+        {
+            new DraftStore().ClearTracking(project);
+        }
+    }
+
+    [Fact]
+    public void Load_reuses_the_same_compilation_while_the_sources_are_unchanged()
+    {
+        // "拟定全程在内存里做"的前提：源码没变就复用同一份编译；
+        // 磁盘上的 .cs 一旦变了（哪怕只动时间戳）就重装配。
+        string project = NewProject(out string directory);
+        try
+        {
+            LoadedProject first = LoadedProject.Load(project);
+            Assert.Same(first, LoadedProject.Load(project));
+
+            File.SetLastWriteTimeUtc(Path.Combine(directory, "Class1.cs"), DateTime.UtcNow.AddMinutes(5));
+            Assert.NotSame(first, LoadedProject.Load(project));
         }
         finally
         {

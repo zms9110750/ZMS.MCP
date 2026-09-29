@@ -155,8 +155,50 @@ public static class DraftService
             builder.AppendLine($"- {project.ModeNotice()}");
         }
 
+        AppendStagedDiagnostics(builder, project, store, projectPath);
+        builder.AppendLine();
         builder.AppendLine("- 落盘许可（若有）已作废：要落盘请重新 confirm_draft（不带 cookie）做预检。");
         return builder.ToString();
+    }
+
+    /// <summary>
+    /// 报出"这次 stage 让诊断多了什么、少了什么"。
+    /// 报**相对变化**而不是绝对对错 —— 串行拟定的中间态本来就可能不完整（先加接口成员、再加实现），
+    /// 报绝对对错会一直吵。
+    /// </summary>
+    private static void AppendStagedDiagnostics(
+        StringBuilder builder,
+        LoadedProject project,
+        DraftStore store,
+        string projectPath)
+    {
+        DraftRecord? record = store.Find(projectPath);
+        if (record == null || record.Edits.Count == 0)
+        {
+            return;
+        }
+
+        builder.AppendLine();
+        builder.AppendLine("## 这条改动带来的诊断变化");
+        DraftPlanner.Plan plan;
+        try
+        {
+            plan = DraftPlanner.Compute(project, record.Edits);
+        }
+        catch (InvalidOperationException exception)
+        {
+            builder.AppendLine($"- 算不出来：{exception.Message}");
+            return;
+        }
+
+        DiagnosticSnapshot before = Analyze(project.Compilation);
+        DiagnosticSnapshot after = Analyze(plan.Projected);
+        AppendDiagnostics(builder, "新增", after, before);
+        AppendDiagnostics(builder, "消失", before, after);
+        if (plan.Missing.Count > 0)
+        {
+            builder.AppendLine($"- ⚠ 有 {plan.Missing.Count} 条拟定定位不到符号：{string.Join(", ", plan.Missing)}");
+        }
     }
 
     /// <summary>把 cookie 换成项目路径；cookie 无效就报「先 track_project」。</summary>
