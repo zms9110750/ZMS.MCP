@@ -67,6 +67,41 @@ public sealed class SymbolBaselineTests
     }
 
     [Fact]
+    public void The_hash_still_tells_generic_arguments_apart()
+    {
+        // 回归：DocumentationCommentId 对构造泛型只给到定义（`List`1`），
+        // 所以实参必须自己递归 —— 否则这里会全部相等，冲突检测就漏报了。
+        string ints = HashOf("namespace Demo;\npublic class C { private System.Collections.Generic.List<int> _items; }", "Demo.C");
+        string strings = HashOf("namespace Demo;\npublic class C { private System.Collections.Generic.List<string> _items; }", "Demo.C");
+        string swapped = HashOf("namespace Demo;\npublic class C { private System.Collections.Generic.Dictionary<string, int> _items; }", "Demo.C");
+        string swappedOther = HashOf("namespace Demo;\npublic class C { private System.Collections.Generic.Dictionary<int, string> _items; }", "Demo.C");
+
+        Assert.NotEqual(ints, strings);
+        Assert.NotEqual(swapped, swappedOther);
+    }
+
+    [Fact]
+    public void The_hash_still_tells_nullable_and_tuple_elements_apart()
+    {
+        string intNullable = HashOf("namespace Demo;\npublic class C { private int? _value; }", "Demo.C");
+        string longNullable = HashOf("namespace Demo;\npublic class C { private long? _value; }", "Demo.C");
+        string tuple = HashOf("namespace Demo;\npublic class C { private (int a, string b) _value; }", "Demo.C");
+        string otherTuple = HashOf("namespace Demo;\npublic class C { private (double c, bool d) _value; }", "Demo.C");
+
+        Assert.NotEqual(intNullable, longNullable);
+        Assert.NotEqual(tuple, otherTuple);
+    }
+
+    [Fact]
+    public void The_hash_still_tells_array_elements_apart()
+    {
+        string ints = HashOf("namespace Demo;\npublic class C { private int[] _value; }", "Demo.C");
+        string strings = HashOf("namespace Demo;\npublic class C { private string[] _value; }", "Demo.C");
+
+        Assert.NotEqual(ints, strings);
+    }
+
+    [Fact]
     public void The_hash_follows_a_really_new_member()
     {
         string before = HashOf("namespace Demo;\npublic class C { public int Value; }", "Demo.C");

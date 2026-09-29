@@ -263,14 +263,19 @@ public static class SymbolBaseline
     }
 
     /// <summary>
-    /// 符号的规范身份：优先用 XML 文档 ID（与 using / 别名 / 简称无关，`int` 与 `System.Int32` 同一个），
-    /// 取不到就退回显示名。一律用 <c>OriginalDefinition</c>，泛型实例与定义归一。
+    /// 符号的规范身份：**完全限定的显示名**（用构造后的符号，所以泛型实参在里面）。
+    ///
+    /// 为什么不用 XML 文档 ID：它只给到"定义" —— `List&lt;int&gt;` 与 `List&lt;string&gt;` 都返回
+    /// `T:System.Collections.Generic.List\`1`，**类型实参被吞掉**，两者 hash 就相等了；
+    /// 那样"别人改过"检测不出来，预检放行、落盘会覆盖掉别人的改动。
+    /// 又为什么不取 <c>OriginalDefinition</c>：它同样是未构造的 `List&lt;T&gt;`，实参一样会没。
+    /// 完全限定格式则与 using / 别名 / 简称无关
+    /// （`List&lt;int&gt;`、`System.Collections.Generic.List&lt;int&gt;`、`using L = …; L&lt;int&gt;`
+    /// 解析到同一个类型，得到同一个串）。
     /// </summary>
     private static string SymbolIdentity(ISymbol symbol)
     {
-        ISymbol original = symbol.OriginalDefinition;
-        return original.GetDocumentationCommentId()
-            ?? "?" + original.ToDisplayString(IdentityFormat);
+        return symbol.ToDisplayString(IdentityFormat);
     }
 
     private static string Normalize(string text)
