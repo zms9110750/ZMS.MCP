@@ -60,6 +60,33 @@ public static class SymbolLocator
     }
 
     /// <summary>
+    /// 这个路径是不是一个**已存在**的命名空间。
+    /// 用来区分 <c>stage_draft</c> 的两种新建：<c>typePath</c> 指向命名空间 = 在它下面加一个类；
+    /// 否则 <c>typePath</c> 就是新类型的全名。
+    /// </summary>
+    public static bool IsNamespace(Compilation compilation, string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        INamespaceSymbol? current = compilation.GlobalNamespace;
+        foreach (string part in path.Trim().Split('.'))
+        {
+            current = part.Length == 0
+                ? null
+                : current?.GetNamespaceMembers().FirstOrDefault(ns => ns.Name == part);
+            if (current == null)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// 在候选类型里按名字挑一个：支持 <c>List</c> 与带元数的 <c>List`1</c> 两种写法。
     /// 命中**多个**声明时不猜 —— 直接报"匹配到多个声明"（同名类型分处两个文件等）。
     /// </summary>

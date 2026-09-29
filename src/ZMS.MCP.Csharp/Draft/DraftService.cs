@@ -183,8 +183,15 @@ public static class DraftService
         INamedTypeSymbol? type = SymbolLocator.FindType(project.Compilation, typePath);
         if (type == null || !IsExactTypePath(type, typePath))
         {
-            // 类型还不存在 —— 或者 typePath 指的是**嵌套类型**、而 FindType 只解到了外层类型，
-            // 两种都是"新建类型"（快照为空 = 当时不存在）
+            // 两种都算"新建"，但符号身份不同：
+            // - typePath 是**已存在的命名空间** → 在它下面加一个类（类名写在 content 里）
+            // - 否则 typePath 就是新类型的全名（也涵盖"typePath 指嵌套类型、FindType 只解到外层"）
+            // 快照为空 = 当时不存在。
+            if (SymbolLocator.IsNamespace(project.Compilation, typePath))
+            {
+                return ($"{typePath}.{NewTypeNameOf(content)}", "", "新建类型");
+            }
+
             return (typePath, "", content == null ? "removed" : "新建类型");
         }
 
@@ -203,11 +210,62 @@ public static class DraftService
 
         if (members.Count == 0)
         {
+            // 带了参数表的 memberName 是一条**精确路径**（"我要的就是这个签名"）—— 匹配不上就报错。
+            // 当成新增会写出第二份同名成员（CS0111），而那要等预检诊断才看得出来。
+            // 裸名字才是"新成员的名字"，匹配不上就是新增。
+            if (memberName.Contains('(', StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"定位不到符号：{typePath}.{memberName}"
+                    + Nearby(type, memberName)
+                    + " —— 参数表写错了？要是本来就想新增，就别带参数表。");
+            }
+
             return ($"{SymbolBaseline.Key(type)}.{memberName}", "", content == null ? "removed" : "added");
         }
 
         ISymbol member = members[0];
         return (SymbolBaseline.Key(member), SymbolBaseline.DeclaredText(member), verb);
+    }
+
+    /// <summary>名字对得上、但签名对不上的那些成员（提示"是不是想写它"）。</summary>
+    private static string Nearby(INamedTypeSymbol type, string memberName)
+    {
+        int bracket = memberName.IndexOf('(', StringComparison.Ordinal);
+        string bare = (bracket > 0 ? memberName[..bracket] : memberName).Trim();
+        List<ISymbol> same = [.. type.GetMembers(bare).Where(member => !member.IsImplicitlyDeclared)];
+        if (same.Count == 0)
+        {
+            return "";
+        }
+
+        StringBuilder builder = new();
+        builder.Append($"；{type.Name} 里叫 {bare} 的有这些：");
+        foreach (ISymbol item in same)
+        {
+            builder.Append(Environment.NewLine).Append("  - ").Append(CodeEditor.MemberSignature(item));
+        }
+
+        return builder.ToString();
+    }
+
+    /// <summary>从一段类型声明里取类型名（给"在命名空间下加一个类"用）。</summary>
+    private static string NewTypeNameOf(string? content)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return "NewType";
+        }
+
+        foreach (SyntaxNode node in CSharpSyntaxTree.ParseText(content).GetRoot().DescendantNodes())
+        {
+            if (node is BaseTypeDeclarationSyntax declaration)
+            {
+                return declaration.Identifier.Text;
+            }
+        }
+
+        return "NewType";
     }
 
     /// <summary>
@@ -770,22 +828,27 @@ public static class DraftService
         INamedTypeSymbol? type = SymbolLocator.FindType(compilation, typePath);
         if (type == null || !IsExactTypePath(type, typePath))
         {
-            description = $"新建类型 {typePath}";
+            // typePath 指向**已存在的命名空间** = 在它下面加一个类：类名取自 content，
+            // 于是真正的类型全名是「命名空间 + "." + 类名」。
+            string fullPath = SymbolLocator.IsNamespace(compilation, typePath)
+                ? $"{typePath}.{NewTypeNameOf(content)}"
+                : typePath;
+            description = $"新建类型 {fullPath}";
             List<CodeChange> created = [];
 
             // 新建嵌套类型时外层类型必须标 partial：新文件里外层也要带 partial，否则两边对不上
             // （见测试 Stage_creates_a_nested_type_and_marks_the_outer_type_partial）。
-            int lastDot = typePath.LastIndexOf('.');
+            int lastDot = fullPath.LastIndexOf('.');
             if (lastDot > 0)
             {
-                INamedTypeSymbol? outer = SymbolLocator.FindType(compilation, typePath[..lastDot]);
+                INamedTypeSymbol? outer = SymbolLocator.FindType(compilation, fullPath[..lastDot]);
                 if (outer != null)
                 {
                     created.AddRange(EnsurePartial(outer));
                 }
             }
 
-            created.Add(CreateNewType(project.Info, compilation, typePath, content));
+            created.Add(CreateNewType(project.Info, compilation, fullPath, content));
             return created;
         }
 

@@ -147,12 +147,28 @@ public static class CodeEditor
     {
         SyntaxNode node = SourceNode(symbol)
             ?? throw new InvalidOperationException($"'{symbol.Name}' has no source declaration to remove.");
-        FileLinePositionSpan span = node.GetLocation().GetLineSpan();
-        SyntaxNode root = node.SyntaxTree.GetRoot();
-        SyntaxNode? updated = root.RemoveNode(node, SyntaxRemoveOptions.KeepLeadingTrivia)
+
+        // 字段的声明节点是 VariableDeclarator（**一个声明符**），直接删它会留下
+        // "private static readonly ConcurrentDictionary<..>..;" 这种壳（CS1519）。
+        // 要上溯到整个成员声明（FieldDeclaration / MethodDeclaration / …）。
+        SyntaxNode target = DeclarationOf(node);
+        FileLinePositionSpan span = target.GetLocation().GetLineSpan();
+        SyntaxNode root = target.SyntaxTree.GetRoot();
+        SyntaxNode? updated = root.RemoveNode(target, SyntaxRemoveOptions.KeepNoTrivia)
             ?? throw new InvalidOperationException("Failed to remove the node.");
         updated = FormatIfNeeded(updated, format);
-        return Compute(node.SyntaxTree.FilePath, updated, "removed", (span.StartLinePosition.Line + 1, span.EndLinePosition.Line + 1));
+        return Compute(target.SyntaxTree.FilePath, updated, "removed", (span.StartLinePosition.Line + 1, span.EndLinePosition.Line + 1));
+    }
+
+    /// <summary>把符号的声明节点上溯到"整个成员声明"：变量声明符 → 它所在的字段声明。</summary>
+    private static SyntaxNode DeclarationOf(SyntaxNode node)
+    {
+        if (node is MemberDeclarationSyntax)
+        {
+            return node;
+        }
+
+        return node.FirstAncestorOrSelf<MemberDeclarationSyntax>() ?? node;
     }
 
     /// <summary>成员声明节点对应的源码文本（不带行号，方便直接复制修改）。</summary>

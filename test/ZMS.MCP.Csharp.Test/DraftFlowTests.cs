@@ -348,8 +348,10 @@ public sealed class DraftFlowTests
         try
         {
             string cookie = TrackAndTakeCookie(project);
-            // 往既有类里加成员：文件已存在，但这不是"新建文件"，不该被拦
-            DraftService.Stage(cookie, "Demo.Class1", "Sub(int,int)", "public static int Sub(int a, int b) { return a - b; }");
+            // 往既有类里加成员：文件已存在，但这不是"新建文件"，不该被拦。
+            // memberName 用**裸名**（新成员的名字）—— 带上参数表就等于声明"我指的是这个已有签名"，
+            // 匹配不上会直接报错。
+            DraftService.Stage(cookie, "Demo.Class1", "Sub", "public static int Sub(int a, int b) { return a - b; }");
 
             string precheck = DraftService.Confirm(cookie, "", apply: true);
 
@@ -360,6 +362,84 @@ public sealed class DraftFlowTests
 
             string text = File.ReadAllText(source);
             Assert.Contains("public static int Sub(int a, int b)", text, StringComparison.Ordinal);
+            Assert.Contains("public static int Add(int a, int b)", text, StringComparison.Ordinal);
+        }
+        finally
+        {
+            new DraftStore().ClearTracking(project);
+        }
+    }
+
+    [Fact]
+    public void Stage_refuses_a_parameter_list_that_matches_nothing()
+    {
+        // 带了参数表 = "我指的就是这个签名"，匹配不上就别当新增（那会写出第二份同名成员，CS0111）
+        string project = NewProject(out _);
+        try
+        {
+            string cookie = TrackAndTakeCookie(project);
+
+            InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
+                () => DraftService.Stage(cookie, "Demo.Class1", "Add(int,long)", "public static int Add(int a, long b) { return 0; }"));
+
+            Assert.Contains("定位不到符号", exception.Message, StringComparison.Ordinal);
+            // 名字对得上、签名对不上的那些要摆出来，好让人看出是参数表写错了
+            Assert.Contains("Add", exception.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            new DraftStore().ClearTracking(project);
+        }
+    }
+
+    [Fact]
+    public void Stage_adds_a_class_under_a_namespace()
+    {
+        // typePath 指向**命名空间** → 在那个命名空间下加一个类（类名写在 content 里）
+        string project = NewProject(out string directory);
+        try
+        {
+            string cookie = TrackAndTakeCookie(project);
+            DraftService.Stage(cookie, "Demo", "", "public class Widget\n{\n    public int Value;\n}\n");
+
+            string precheck = DraftService.Confirm(cookie, "", apply: true);
+            Assert.Contains("落盘 cookie", precheck);
+            Assert.Contains("已落盘", DraftService.Confirm(cookie, TakeCookie(precheck), apply: true));
+
+            string widget = Path.Combine(directory, "Widget.cs");
+            Assert.True(File.Exists(widget), "新的类该落在命名空间对应的目录里");
+            string text = File.ReadAllText(widget);
+            Assert.Contains("namespace Demo;", text, StringComparison.Ordinal);
+            Assert.Contains("public class Widget", text, StringComparison.Ordinal);
+        }
+        finally
+        {
+            new DraftStore().ClearTracking(project);
+        }
+    }
+
+    [Fact]
+    public void Removing_a_field_leaves_no_shell_behind()
+    {
+        // 字段的声明节点是**一个声明符**（VariableDeclarator），直接删它会留下
+        // "private static readonly T;" 这种壳（CS1519）
+        string project = NewProject(out string directory);
+        string source = Path.Combine(directory, "Class1.cs");
+        try
+        {
+            File.WriteAllText(
+                source,
+                "namespace Demo;\n\npublic class Class1\n{\n    private static readonly System.Collections.Generic.Dictionary<string, int> Cache = new();\n\n    public static int Add(int a, int b) { return a + b; }\n}\n");
+
+            string cookie = TrackAndTakeCookie(project);
+            DraftService.Stage(cookie, "Demo.Class1", "Cache", null);
+
+            string precheck = DraftService.Confirm(cookie, "", apply: true);
+            Assert.Contains("已落盘", DraftService.Confirm(cookie, TakeCookie(precheck), apply: true));
+
+            string text = File.ReadAllText(source);
+            Assert.DoesNotContain("Cache", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("private static readonly", text, StringComparison.Ordinal);
             Assert.Contains("public static int Add(int a, int b)", text, StringComparison.Ordinal);
         }
         finally
@@ -448,7 +528,7 @@ public sealed class DraftFlowTests
         {
             string cookie = TrackAndTakeCookie(project);
             // 引用一个不存在的成员：拟定本身语法合法，但应用后会新增一个编译错误
-            DraftService.Stage(cookie, "Demo.Class1", "Bad()", "public static int Bad() { return NotExist.Value; }");
+            DraftService.Stage(cookie, "Demo.Class1", "Bad", "public static int Bad() { return NotExist.Value; }");
 
             string precheck = DraftService.Confirm(cookie, "", apply: true);
 
