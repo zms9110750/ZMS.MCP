@@ -761,4 +761,31 @@ public sealed class DraftFlowTests
             new DraftStore().ClearTracking(project);
         }
     }
+
+    [Fact]
+    public void Rename_warns_about_projects_that_reference_this_one()
+    {
+        // 拟定与落盘都是**单项目**装配的：引用本项目的项目看不见，必须明确报出来 ——
+        // 不然"改完那边编译不过"就是个静默的坑（实机踩到过）。
+        string project = NewProjectWithReference(out string directory);
+        try
+        {
+            string consumer = Path.Combine(directory, "Consumer");
+            Directory.CreateDirectory(consumer);
+            File.WriteAllText(
+                Path.Combine(consumer, "Consumer.csproj"),
+                "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net11.0</TargetFramework></PropertyGroup>"
+                + "<ItemGroup><ProjectReference Include=\"..\\Demo.csproj\" /></ItemGroup></Project>");
+
+            string cookie = TrackAndTakeCookie(project);
+            string staged = DraftService.Rename(cookie, "Demo.Calculator.AddUp(int, int)", "Sum");
+
+            Assert.Contains("看不见", staged, StringComparison.Ordinal);
+            Assert.Contains("Consumer.csproj", staged, StringComparison.Ordinal);
+        }
+        finally
+        {
+            new DraftStore().ClearTracking(project);
+        }
+    }
 }

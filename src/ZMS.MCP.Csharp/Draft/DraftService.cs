@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -221,7 +222,19 @@ public static class DraftService
         builder.AppendLine($"- 符号：{symbolKey}");
         builder.AppendLine($"- 改名：{symbol.Name} → {wanted}");
         builder.AppendLine($"- 拟定条数：{store.Find(projectPath)?.Edits.Count ?? 0}");
-        builder.AppendLine("- 要改的地方（声明 + 本编译里的引用）**现在还没算、也还没碰任何文件** —— 留到落盘现场。");
+        builder.AppendLine("- 要改的地方（声明 + **本项目编译里**的引用）留到落盘现场算 —— 现在还没碰任何文件。");
+
+        IReadOnlyList<string> referencing = ReferencingProjects(projectPath);
+        if (referencing.Count > 0)
+        {
+            builder.AppendLine();
+            builder.AppendLine("⚠ 本项目的编译**看不见**引用它的项目：那边如果也用了这个符号，得你自己去改。");
+            foreach (string one in referencing)
+            {
+                builder.AppendLine($"  - {one}");
+            }
+        }
+
         builder.AppendLine("- 落盘：先 confirm_draft（不带 applyCookie）做预检，拿回来的 applyCookie 再调一次。");
         return builder.ToString();
     }
@@ -235,6 +248,80 @@ public static class DraftService
         return spec.Length == 0
             ? resolved.Type
             : SymbolLocator.ResolveSingleMember(resolved.Type, spec);
+    }
+
+    /// <summary>
+    /// 找"引用了这个项目"的其它项目。
+    ///
+    /// 拟定与落盘都是**单项目**加载的（追踪哪个 csproj 就只装配那个项目的编译），
+    /// 所以改名**看不见引用项目里的引用点** —— 那边会编译不过。这不是能静默过去的事：
+    /// 老老实实报出来，让调用方知道改完还得自己去那几个项目里补。
+    /// </summary>
+    private static IReadOnlyList<string> ReferencingProjects(string projectPath)
+    {
+        string full = Path.GetFullPath(projectPath);
+        string name = Path.GetFileName(full);
+        HashSet<string> found = new(PathComparison.Comparer);
+
+        // 从项目所在目录往上找，扫同一条路径上的兄弟项目 —— 覆盖"平铺"和"按解决方案分目录"两种常见布局
+        DirectoryInfo? directory = new FileInfo(full).Directory;
+        for (int level = 0; directory != null && level < 4; level++)
+        {
+            foreach (FileInfo candidate in SafeProjects(directory))
+            {
+                if (candidate.FullName.Equals(full, PathComparison.Comparison))
+                {
+                    continue;
+                }
+
+                if (References(candidate.FullName, name))
+                {
+                    found.Add(candidate.FullName);
+                }
+            }
+
+            directory = directory.Parent;
+        }
+
+        return [.. found];
+    }
+
+    /// <summary>把这个目录（含子目录）下的 csproj 全找出来；权限不足的目录直接跳过，不让它拖垮工具。</summary>
+    private static IEnumerable<FileInfo> SafeProjects(DirectoryInfo directory)
+    {
+        try
+        {
+            return [.. directory.EnumerateFiles("*.csproj", SearchOption.AllDirectories)];
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return [];
+        }
+    }
+
+    /// <summary>这个 csproj 通过 &lt;ProjectReference&gt; 引用了名为 <paramref name="name"/> 的项目吗。</summary>
+    private static bool References(string csprojPath, string name)
+    {
+        string text;
+        try
+        {
+            text = File.ReadAllText(csprojPath);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+
+        foreach (Match match in Regex.Matches(text, "<ProjectReference[^>]*Include\\s*=\\s*\"([^\"]+)\"", RegexOptions.IgnoreCase))
+        {
+            string referenced = Path.GetFileName(match.Groups[1].Value.Replace('\\', Path.DirectorySeparatorChar));
+            if (referenced.Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -971,6 +1058,8 @@ public static class DraftService
         {
             builder.AppendLine($"  - {file.Key}：{string.Join("、", file.Value)}");
         }
+
+        builder.AppendLine("  （只在**本项目**的编译里找 —— 引用本项目的其它项目不在这份清单里）");
     }
 
     /// <summary>把一条拟定算成若干次文件改动（改成员 / 删成员 / 新增成员 / 新建类型都可能牵扯多个文件）。</summary>
