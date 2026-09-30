@@ -788,7 +788,6 @@ Newtonsoft.Json
 | `typePath` | `:string` | 指向**类** → 改它的成员；指向**命名空间** → 在那个命名空间下**加一个类**（见下） |
 | `memberName` | `:string` | 成员名；跟已有重载撞名时带参数表消歧。**`typePath` 指向命名空间时忽略它** |
 | `content` | `:string` | 要写进去的代码 —— 是**成员**还是**类声明**，由 `typePath` 指向什么决定 |
-| `before` | `string?` | 插入位置参照（加成员时用） |
 
 **`typePath` 指向什么，就加什么**：
 
