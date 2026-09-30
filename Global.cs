@@ -64,7 +64,16 @@ internal static class McpStdioServer
                         };
                     }
 
-                    return await next(context, cancellationToken);
+                    CallToolResult result = await next(context, cancellationToken);
+
+                    // 工具把失败写成 "Error: ..." 文本（ToolGuard 的约定），回来时把它翻成协议层的信号：
+                    // 否则调用方只能靠读文本猜"到底成没成"，而 isError 一直说"成功"。
+                    if (result.IsError != true && Failed(result))
+                    {
+                        result.IsError = true;
+                    }
+
+                    return result;
                 }));
 
         // 把"边界在哪"写进 server instructions：调用方一上来就知道自己只能碰哪儿
@@ -80,6 +89,28 @@ internal static class McpStdioServer
         configure?.Invoke(mcp);
 
         return builder.Build();
+    }
+
+    /// <summary>
+    /// "这次调用失败了"的文本前缀。工具失败时返回的第一段文本以它开头
+    /// （<c>ToolGuard</c> 捕获异常、工作空间边界拒绝，两处都这么写）。
+    /// </summary>
+    internal const string FailurePrefix = "Error: ";
+
+    /// <summary>
+    /// 这次调用的结果是不是"失败" —— 只看**第一段**文本，正常结果里出现 "Error: " 字样不该被误判。
+    /// </summary>
+    private static bool Failed(CallToolResult result)
+    {
+        foreach (ContentBlock block in result.Content ?? [])
+        {
+            if (block is TextContentBlock text)
+            {
+                return text.Text.StartsWith(FailurePrefix, StringComparison.Ordinal);
+            }
+        }
+
+        return false;
     }
 }
 

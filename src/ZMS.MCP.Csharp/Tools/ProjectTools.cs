@@ -96,8 +96,16 @@ public static class ProjectTools
 
     private static string FormatDotnetResult(int exitCode, string output, string successMessage)
     {
+        if (exitCode != 0)
+        {
+            // 失败就得是**失败**：抛出去，ToolGuard 会转成 Error: 前缀，过滤器再把 isError 置为 true。
+            // 否则命令行的 exit code 1 只活在文本里，调用方会以为改成功了（实测踩过：项目没加进 slnx）。
+            throw new InvalidOperationException(
+                $"dotnet 退出码 {exitCode}，{successMessage} 没有完成。" + Environment.NewLine + output.Trim());
+        }
+
         StringBuilder builder = new();
-        builder.AppendLine(exitCode == 0 ? "✅ " + successMessage : $"❌ exit code {exitCode}");
+        builder.AppendLine("✅ " + successMessage);
         if (!string.IsNullOrWhiteSpace(output))
         {
             builder.AppendLine();

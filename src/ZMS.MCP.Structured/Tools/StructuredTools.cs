@@ -38,7 +38,7 @@ public static partial class StructuredTools
         }
         catch (Exception exception)
         {
-            return "Error: " + exception.Message;
+            return McpStdioServer.FailurePrefix + exception.Message;
         }
     }
 
@@ -69,7 +69,7 @@ public static partial class StructuredTools
         }
         catch (Exception exception)
         {
-            return "Error: " + exception.Message;
+            return McpStdioServer.FailurePrefix + exception.Message;
         }
     }
 
