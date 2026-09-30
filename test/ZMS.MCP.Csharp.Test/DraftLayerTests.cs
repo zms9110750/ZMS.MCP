@@ -755,7 +755,7 @@ public sealed class DraftLayerTests
 
         // confirm_draft 只认追踪 cookie（不再要 csprojPath）；cookie 无效就抛错（由 ToolGuard 转成 Error: 文本）
         InvalidOperationException invalid = Assert.Throws<InvalidOperationException>(
-            () => DraftService.Confirm("no-such-cookie", "", apply: true));
+            () => DraftService.Confirm("no-such-cookie", ""));
         Assert.Contains("track_project", invalid.Message);
 
         // 有追踪但没有任何拟定：同样拒绝（服务层与默认库打交道，所以这里也用默认库，收尾清掉）
@@ -763,7 +763,7 @@ public sealed class DraftLayerTests
         try
         {
             store.SaveTracking(project, "track-cookie", new Dictionary<string, string>());
-            string report = DraftService.Confirm("track-cookie", "", apply: true);
+            string report = DraftService.Confirm("track-cookie", "");
             Assert.Contains("拟定", report);
         }
         finally

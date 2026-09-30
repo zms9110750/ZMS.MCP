@@ -65,10 +65,9 @@ public static class DraftTools
         "then writes (journal -> atomic write -> clear journal/draft/permits -> dotnet format -> recompute the tracking baseline).")]
     public static string ConfirmDraft(
         [Description("Tracking cookie from track_project")] string cookie,
-        [Description("applyCookie from the pre-check; empty = pre-check only")] string applyCookie,
-        [Description("Set false to only preview even when the cookie matches")] bool apply = true)
+        [Description("applyCookie from the pre-check; empty = pre-check only")] string applyCookie)
     {
-        return ToolGuard.Run(() => DraftService.Confirm(cookie, applyCookie, apply));
+        return ToolGuard.Run(() => DraftService.Confirm(cookie, applyCookie));
     }
 
     [McpServerTool(ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]

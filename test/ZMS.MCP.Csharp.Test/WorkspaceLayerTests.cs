@@ -206,31 +206,64 @@ public sealed class WorkspaceLayerTests
 
     // ───────── 编辑元数据 ─────────
 
+    /// <summary>两段式的第一段：只读，给原文 + cookie，不动文件。</summary>
+    private static string ReadMetadataCookie(string project)
+    {
+        string report = ProjectEditor.EditMetadata(project);
+        int start = report.IndexOf("cookie：`", StringComparison.Ordinal) + 8;
+        int end = report.IndexOf('`', start);
+        Assert.True(start > 7 && end > start, "读的时候没有给出 cookie：\n" + report);
+
+        return report[start..end];
+    }
+
     [Fact]
     public void EditMetadata_refuses_broken_xml_and_wrong_root_element()
     {
         string root = NewTempDirectory();
         string project = Write(root, "Demo.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        string cookie = ReadMetadataCookie(project);
 
-        Assert.Throws<InvalidOperationException>(() => ProjectEditor.EditMetadata(project, "<Project><PropertyGroup>"));
-        Assert.Throws<InvalidOperationException>(() => ProjectEditor.EditMetadata(project, "<NotProject />"));
+        Assert.Throws<InvalidOperationException>(() => ProjectEditor.EditMetadata(project, "<Project><PropertyGroup>", cookie));
+        Assert.Throws<InvalidOperationException>(() => ProjectEditor.EditMetadata(project, "<NotProject />", cookie));
         // 检查没过就绝不落盘
         Assert.Equal("<Project Sdk=\"Microsoft.NET.Sdk\" />", File.ReadAllText(project));
     }
 
     [Fact]
-    public void EditMetadata_dry_run_reports_but_does_not_write()
+    public void EditMetadata_reads_first_and_refuses_to_write_without_a_cookie()
     {
         string root = NewTempDirectory();
         string project = Write(root, "Demo.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
 
-        string report = ProjectEditor.EditMetadata(
-            project,
-            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><Nullable>enable</Nullable></PropertyGroup></Project>",
-            dryRun: true);
+        // 第一段：给原文 + cookie
+        string read = ProjectEditor.EditMetadata(project);
+        Assert.Contains("cookie：`", read, StringComparison.Ordinal);
+        Assert.Contains("Microsoft.NET.Sdk", read, StringComparison.Ordinal);
 
-        Assert.Contains("预演", report);
-        Assert.Equal("<Project Sdk=\"Microsoft.NET.Sdk\" />", File.ReadAllText(project));
+        // 带 content 却不带 cookie：拒绝（没有它就没法确认改的是哪一版）
+        Assert.Throws<InvalidOperationException>(
+            () => ProjectEditor.EditMetadata(project, "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup /></Project>"));
+    }
+
+    [Fact]
+    public void EditMetadata_refuses_when_the_file_changed_after_the_read()
+    {
+        string root = NewTempDirectory();
+        string project = Write(root, "Demo.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        string cookie = ReadMetadataCookie(project);
+
+        // 读完之后别人动了文件
+        File.WriteAllText(
+            project,
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><Nullable>enable</Nullable></PropertyGroup></Project>");
+        string after = File.ReadAllText(project);
+
+        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
+            () => ProjectEditor.EditMetadata(project, "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup /></Project>", cookie));
+        Assert.Contains("cookie 对不上", exception.Message, StringComparison.Ordinal);
+        // 拒绝就是拒绝：一个字节都不动
+        Assert.Equal(after, File.ReadAllText(project));
     }
 
     [Fact]
@@ -240,7 +273,10 @@ public sealed class WorkspaceLayerTests
         string project = Path.Combine(root, "Demo.csproj");
         File.WriteAllText(project, "<Project Sdk=\"Microsoft.NET.Sdk\" />", new UTF8Encoding(true));
 
-        string report = ProjectEditor.EditMetadata(project, "<Project Sdk=\"Microsoft.NET.Sdk\" />\n");
+        string report = ProjectEditor.EditMetadata(
+            project,
+            "<Project Sdk=\"Microsoft.NET.Sdk\" />\n",
+            ReadMetadataCookie(project));
 
         Assert.Contains("已写入", report);
         Assert.Contains("utf-8", report, StringComparison.OrdinalIgnoreCase);

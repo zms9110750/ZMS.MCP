@@ -20,6 +20,7 @@
 - 需要外部命令的写入工具（解决方案编辑、装包/删包、迁移）**不进任何事务**：立刻改盘、不可回滚。
 - **符号寻址只有一套语法**：`命名空间.类型.成员`，方法带**无空格**参数表。`symbols`、`stage_draft`、`rename_symbol` 全都走同一个解析器，`symbols` 列出来的写法可以直接抄给其它工具。
 - **编译器项目进度的三种状态**要分清：`按需加载`（首次求值，秒级）/ `命中缓存`（磁盘没变，毫秒级）/ `重新求值`（磁盘变了）。输出里会标明这次是哪一种。
+- **只有"读现状 → 决策 → 写回"的操作才需要两段式确认**（cookie）。全文替换的项目文件也算 —— 因为那份"全文"是基于读到的现状构造的；**现读现改的命令行**（`dotnet add/remove package`）不算，它不存在"基于过期快照覆盖"；**只写自己库的**（追踪 / 拟定记录）也不算。
 
 ---
 
@@ -186,26 +187,47 @@ X:\temp\zms-tool-drill\Demo\obj\Demo.csproj.nuget.g.props
 | 参数 | 类型 | 说明 |
 |---|---|---|
 | `csprojPath` | `:string` | 要能解析到项目文件 |
-| `content` | `:string` | **完整** csproj 内容；先过两道校验：XML 语法合法；根元素是 `<Project>`。不通过一个字节都不写 |
-| `dryRun` | `boolean` | 默认 `false`；`true` 只校验并展示，不写盘 |
+| `content` | `:string?` | **完整** csproj 新内容；**空串 = 只读**（第一段） |
+| `cookie` | `:string?` | 第一段读到的 cookie；写的时候必填 |
 
-整文件替换 csproj 内容，写回用**文件原编码**。
+**两段式**（这是它唯一的使用方式）：
 
-**实测输出**（`dryRun=true`）：
+| 调用 | 做什么 |
+|---|---|
+| `content` 与 `cookie` 都空 | **读**：给 csproj 原文 + 文件编码 + 一个 cookie。**不动文件** |
+| `content` 非空 + `cookie` 非空 | **写**：先重读文件算指纹、和 cookie 比对，**一致才**过校验（XML 语法合法 + 根元素 `<Project>`）并写回（用**文件原编码**） |
+| 其它组合 | 报错（不猜） |
+
+**为什么要两段**：写出去的内容是"基于读到的现状"构造的 —— 这期间文件被别人改过，我们就会拿一份**自己没见过的现状**去覆盖，事后也不知道该还原成什么。cookie 就是"我读的是这一版"的凭据，写之前再确认一次。
+
+**实测输出**（第一段，只读）：
 
 ````
 # 编辑元数据
-- 项目：X:\temp\zms-tool-drill\Demo\Demo.csproj
-- 编码：utf-8（来自 无 BOM 且是合法 UTF-8）
-- **预演，未写入**。
+- 项目：C:\Users\16229\source\OpenSourceLibrary\ZMS.MCP\src\ZMS.MCP.Csharp\ZMS.MCP.Csharp.csproj
+- 编码：utf-8（来自 .editorconfig 的 charset）
+- cookie：`fd65a0506a7e66d3`
 
-```xml
 <Project Sdk="Microsoft.NET.Sdk">
 ...
-</Project>
-```
 ````
 
+**实测输出**（第二段，带 cookie 写入）：
+
+```
+# 编辑元数据
+- 项目：...\Demo\Demo.csproj
+- 编码：utf-8（来自 无 BOM 且是合法 UTF-8）
+- 已写入（XML 语法检查 + 根元素 Project 检查通过）。
+```
+
+**实测输出**（期间被人改过 → 拒绝，一个字节都不动）：
+
+```
+Error: cookie 对不上了：你读的是 `fd65a0506a7e66d3`，现在文件是 `a1b2c3d4e5f60718` —— 这期间它被改过。重新读一次、基于最新内容再改。
+```
+
+- cookie 是**文件内容指纹**（换行归一后的 SHA256 前 16 位）：幂等、不存状态 —— 同一份内容永远算出同一串，所以它既能当"我读过这一版"的凭据，也能在写之前确认"还是那一版"。
 - 不做 XML 片段合并 / 补丁；不校验 MSBuild 语义；不进事务。
 - 内容与现状完全一致时不算失败，会明确说"内容没有变化，未写入。"
 - 编码来源可能是 `.editorconfig 的 charset` / `BOM` / `无 BOM 且是合法 UTF-8` 三种。
@@ -332,12 +354,13 @@ newtonsoft.json
 |---|---|---|
 | `csprojPath` | `:string` | 要能解析到项目文件 |
 | `nugetPack` | `string[]` | 至少一项；每项 `名字` 或 `名字@版本`（按**最后一个** `@` 切分）；空项忽略 |
-| `dryRun` | `boolean` | 默认 `false` |
 | `allowPrerelease` | `boolean` | 默认 `false` |
 
 跑 `dotnet add package`（**不进事务**）。
 
-**实测输出**（`dryRun=true`，节选）：
+**没有 `dryRun`**：`dotnet add package` 自己**现读** csproj 再改，不存在"基于过期快照覆盖"的问题 —— 所以它不需要两段式确认。它把"会做什么"和"做了什么"放在**一次调用**里。
+
+**实测输出**（节选）：
 
 ```
 # 以下直接引入包是漏洞的
@@ -378,11 +401,12 @@ NETStandard.Library
 |---|---|---|
 | `csprojPath` | `:string` | 要能解析到项目文件 |
 | `nugetName` | `string[]` | 至少一项 |
-| `dryRun` | `boolean` | 默认 `false` |
 
 跑 `dotnet remove package`，并在移除前后各建一次包图，所以能说明"顺带消失的传递包"。
 
-**实测输出**（`dryRun=true`）：
+**没有 `dryRun`**：同 `install_packages` —— 命令行现读现改，不存在"基于过期快照覆盖"。
+
+**实测输出**：
 
 ```
 # 本次移除包
@@ -872,7 +896,9 @@ Error: 拟定里没有这个符号：Demo.Class1（keep 需要该符号有拟定
 | 项目加载 | 每次 `stage_draft` 都重新读盘 + 装配编译 | **会话级编译缓存**（源码时间戳变了才重装配） |
 | 追踪基线 | 声明**文本** hash（写法不同就误报"被改过"） | **语义** hash（`List<int>` 与全名与别名同一个值） |
 | MSBuild 求值缓存 | 指纹含"最新写入时间"，改任何一行都作废整个求值 | 指纹只认**源文件路径集合**，改内容不重跑求值 |
-| `edit_project_metadata` | 文档没说替代路径 | 明确写"**不创建新文件**，先 `dotnet new`" |
+| `edit_project_metadata` | 文档没说替代路径；有 `dryRun` 布尔 | 明确写"**不创建新文件**，先 `dotnet new`"；改成**两段式**：先读拿内容指纹，写前重读比对再写 |
+| `install_packages` / `remove_packages` | 有 `dryRun` 布尔（两阶段靠重传参数） | **去掉 `dryRun`**：命令行现读现改，不存在"基于过期快照覆盖"，不需要确认步骤 |
+| `confirm_draft` | `apply` + `applyCookie` 两个维度表达同一件事 | 只留 `applyCookie`：**有就是落盘、没有就是预检**，没有第三种状态 |
 
 ## 附：性能与代价
 

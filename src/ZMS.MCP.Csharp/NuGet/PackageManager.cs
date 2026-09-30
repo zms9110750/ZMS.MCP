@@ -25,7 +25,6 @@ public static class PackageManager
     public static string Install(
         string csprojPath,
         IReadOnlyList<PackageRequest> requests,
-        bool dryRun = false,
         bool allowPrerelease = false)
     {
         if (requests.Count == 0)
@@ -135,11 +134,6 @@ public static class PackageManager
         {
             string versionArgument = pair.Value.Length == 0 ? "" : $" --version {pair.Value}";
             builder.AppendLine($"- dotnet add \"{Path.GetFileName(fullPath)}\" package {pair.Key}{versionArgument}");
-            if (dryRun)
-            {
-                continue;
-            }
-
             List<string> arguments = ["add", fullPath, "package", pair.Key];
             if (pair.Value.Length > 0)
             {
@@ -154,13 +148,6 @@ public static class PackageManager
             }
         }
 
-        if (dryRun)
-        {
-            builder.AppendLine();
-            builder.AppendLine("（预演，未真正执行。）");
-            return builder.ToString();
-        }
-
         // 索引有滞后：落盘后再用 restore 的漏洞审计（NU1901–NU1904）核一遍。
         // 传递依赖要覆盖就得带 NuGetAuditMode=all —— 文档说"这一步不能省"。
         builder.AppendLine();
@@ -171,9 +158,9 @@ public static class PackageManager
 
     /// <summary>
     /// 移除：**先建图**（本地已有依赖图）→ 从图里切掉要移除的直接包、算出不再被需要的传递包 → 与移除前的图比对；
-    /// 真跑时再执行命令行并用还原后的图复核一次。
+    /// 执行命令行之后，再用**还原结果**复核一次（切图是推算，实际以还原为准）。
     /// </summary>
-    public static string Remove(string csprojPath, IReadOnlyList<string> packageNames, bool dryRun = false)
+    public static string Remove(string csprojPath, IReadOnlyList<string> packageNames)
     {
         if (packageNames.Count == 0)
         {
@@ -184,32 +171,29 @@ public static class PackageManager
         string workingDirectory = Path.GetDirectoryName(fullPath) ?? ".";
         PackageGraphResult before = PackageGraph.Build(fullPath);
 
-        // 预演也能算：本地依赖图切图（建图 → 切掉要移除的直接包 → 与移除前的图比对）
+        // 先按本地依赖图切图算一遍（建图 → 切掉要移除的直接包 → 与移除前的图比对）
         List<string> disappeared = [.. ComputeDisappearingByGraph(before, packageNames)];
 
-        if (!dryRun)
+        foreach (string name in packageNames)
         {
-            foreach (string name in packageNames)
+            CommandResult result = CommandRunner.Run("dotnet", ["remove", fullPath, "package", name], workingDirectory);
+            if (!result.Succeeded)
             {
-                CommandResult result = CommandRunner.Run("dotnet", ["remove", fullPath, "package", name], workingDirectory);
-                if (!result.Succeeded)
-                {
-                    throw new InvalidOperationException($"dotnet remove package {name} 失败（退出码 {result.ExitCode}）：\n{result.Output}");
-                }
+                throw new InvalidOperationException($"dotnet remove package {name} 失败（退出码 {result.ExitCode}）：\n{result.Output}");
             }
-
-            // 真跑过之后用**还原结果**复核一遍：切图是推算，实际以还原为准
-            PackageGraphResult after = PackageGraph.Build(fullPath);
-            HashSet<string> beforeNames = [.. before.Direct.Select(node => node.Id), .. before.Transitive.Select(node => node.Id)];
-            HashSet<string> afterNames = [.. after.Direct.Select(node => node.Id), .. after.Transitive.Select(node => node.Id)];
-            HashSet<string> removedDirectly = new(packageNames, StringComparer.OrdinalIgnoreCase);
-            disappeared =
-            [
-                .. beforeNames
-                    .Where(name => !afterNames.Contains(name) && !removedDirectly.Contains(name))
-                    .OrderBy(name => name, StringComparer.OrdinalIgnoreCase),
-            ];
         }
+
+        // 跑过之后用**还原结果**复核一遍：切图是推算，实际以还原为准
+        PackageGraphResult after = PackageGraph.Build(fullPath);
+        HashSet<string> beforeNames = [.. before.Direct.Select(node => node.Id), .. before.Transitive.Select(node => node.Id)];
+        HashSet<string> afterNames = [.. after.Direct.Select(node => node.Id), .. after.Transitive.Select(node => node.Id)];
+        HashSet<string> removedDirectly = new(packageNames, StringComparer.OrdinalIgnoreCase);
+        disappeared =
+        [
+            .. beforeNames
+                .Where(name => !afterNames.Contains(name) && !removedDirectly.Contains(name))
+                .OrderBy(name => name, StringComparer.OrdinalIgnoreCase),
+        ];
 
         StringBuilder builder = new();
         builder.AppendLine("# 本次移除包");
@@ -218,12 +202,6 @@ public static class PackageManager
         builder.AppendLine("# 本次移除的依赖传递包");
         // 被直接移除的顶级包已经列在「本次移除包」里，不再重复出现在这里（间接移除就是间接移除）
         Append(builder, disappeared);
-
-        if (dryRun)
-        {
-            builder.AppendLine();
-            builder.AppendLine("（预演：未执行任何命令；上面的「依赖传递包」由本地依赖图切图推出。）");
-        }
 
         return builder.ToString();
     }

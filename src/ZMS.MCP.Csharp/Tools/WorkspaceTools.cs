@@ -53,14 +53,17 @@ public static class WorkspaceTools
 
     [McpServerTool(ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]
     [Description(
-        "Replace a csproj's content. The content must pass XML syntax check and the minimal csproj check " +
-        "(root element <Project>) before anything is written; it is written back using the file's original encoding.")]
+        "Edit a csproj in TWO steps. " +
+        "Step 1 - call with an empty content: returns the current csproj verbatim, its encoding, and a cookie. " +
+        "Step 2 - call with the complete new content plus that cookie: re-reads the file, compares the cookie, " +
+        "and only then validates (XML syntax + root element <Project>) and writes it back using the file's original encoding. " +
+        "If the file changed in between, the write is refused - the cookie exists so the content you replace is the content you actually read.")]
     public static string EditProjectMetadata(
         [Description("csproj path, or a unique project name")] string csprojPath,
-        [Description("Full new csproj content")] string content,
-        [Description("Only validate and show the diff, do not write")] bool dryRun = false)
+        [Description("Complete new csproj content; empty = just read and return the cookie")] string content = "",
+        [Description("Cookie from the read step; the write is refused if the file changed since")] string cookie = "")
     {
-        return ToolGuard.Run(() => ProjectEditor.EditMetadata(csprojPath, content, dryRun));
+        return ToolGuard.Run(() => ProjectEditor.EditMetadata(csprojPath, content, cookie));
     }
 
     [McpServerTool(ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
@@ -109,30 +112,30 @@ public static class WorkspaceTools
     [McpServerTool(ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = true)]
     [Description(
         "Install NuGet packages through 'dotnet add package' (console operation, NOT part of any draft/transaction). " +
-        "Only top-level packages are added directly unless a transitive package's version conflicts with the request. " +
-        "Versions are chosen from the local cache first, then nuget.org; vulnerable versions are replaced by the " +
-        "latest non-vulnerable one using the NuGet vulnerability index. Each item is 'Name' or 'Name@Version'.")]
+        "Reports and does it in one call: the report lists what will be introduced, what got covered by another package's " +
+        "dependency, and which vulnerable versions were replaced - then the commands really run, followed by a post-write " +
+        "vulnerability check. There is no dry-run step, because 'dotnet add package' reads the csproj as it is right now: " +
+        "there is no stale snapshot for a dry run to protect against. " +
+        "Each item is 'Name' or 'Name@Version'.")]
     public static string InstallPackages(
         [Description("csproj path, or a unique project name")] string csprojPath,
         [Description("Packages to install: each item is 'nugetName' or 'nugetName@version', e.g. [\"Newtonsoft.Json@13.0.3\", \"Polly\"]")] string[] nugetPack,
-        [Description("Only decide and show what would happen, do not run the commands")] bool dryRun = false,
         [Description("Also allow prerelease versions")] bool allowPrerelease = false)
     {
-        return ToolGuard.Run(() => PackageManager.Install(csprojPath, ParseRequests(nugetPack), dryRun, allowPrerelease));
+        return ToolGuard.Run(() => PackageManager.Install(csprojPath, ParseRequests(nugetPack), allowPrerelease));
     }
 
     [McpServerTool(ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]
     [Description(
         "Remove NuGet packages through 'dotnet remove package' (console operation, NOT part of any draft/transaction). " +
-        "The report always lists which transitive packages disappear as well: on a dry run those are computed from the local " +
-        "dependency graph (build the graph, cut the removed direct packages, compare with the graph before), and a real run re-checks " +
-        "the same list against the restore result afterwards.")]
+        "The report always lists which transitive packages disappear as well: computed first from the local dependency graph " +
+        "(build the graph, cut the removed direct packages, compare with the graph before), then re-checked against the restore " +
+        "result after the commands ran. There is no dry-run step - 'dotnet remove package' reads the csproj as it is right now.")]
     public static string RemovePackages(
         [Description("csproj path, or a unique project name")] string csprojPath,
-        [Description("nugetName: package ids to remove")] string[] nugetName,
-        [Description("Only show what would happen, do not run the commands")] bool dryRun = false)
+        [Description("Package ids to remove")] string[] nugetName)
     {
-        return ToolGuard.Run(() => PackageManager.Remove(csprojPath, nugetName, dryRun));
+        return ToolGuard.Run(() => PackageManager.Remove(csprojPath, nugetName));
     }
 
     internal static List<PackageRequest> ParseRequests(IEnumerable<string> nugetPack)

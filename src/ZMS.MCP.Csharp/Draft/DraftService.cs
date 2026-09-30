@@ -489,20 +489,20 @@ public static class DraftService
     }
 
     /// <summary>
-    /// 拟定确认：
+    /// 拟定确认 —— **只有两种状态**：没有 applyCookie = 预检；有 applyCookie = 落盘。没有第三种（不需要 apply 开关）。
     /// **不带 applyCookie** = 重建符号树 → 现场定位文件 → 预检（占用 / 符号冲突 / 字节）→ 无未解决冲突才发**内存** applyCookie 并记许可快照；
     /// **带 applyCookie** = 校验 cookie 与「路径 + 文件字节」→ 现场生成整文件新文本 → 落盘事务。
     /// 参数是 `track_project` 拿到的**追踪 cookie**（不再要 csprojPath）。
     /// </summary>
-    public static string Confirm(string cookie, string applyCookie, bool apply)
+    public static string Confirm(string cookie, string applyCookie)
     {
         DraftStore store = new();
         string projectPath = RequireProjectByCookie(store, cookie, "confirm_draft");
-        return ConfirmProject(store, projectPath, applyCookie, apply);
+        return ConfirmProject(store, projectPath, applyCookie);
     }
 
     /// <summary>按已解析的项目路径确认拟定（工具层只给 cookie；这里保留路径入参给内部复用与测试）。</summary>
-    internal static string ConfirmProject(DraftStore store, string projectPath, string applyCookie, bool apply)
+    internal static string ConfirmProject(DraftStore store, string projectPath, string applyCookie)
     {
         DraftRecord? record = store.Find(projectPath);
         if (record == null || record.Edits.Count == 0)
@@ -517,7 +517,7 @@ public static class DraftService
         DiagnosticSnapshot after = Analyze(plan.Projected);
 
         bool cookieGiven = !string.IsNullOrWhiteSpace(applyCookie);
-        if (!apply || !cookieGiven)
+        if (!cookieGiven)
         {
             return Precheck(store, projectPath, project, record, plan, before, after);
         }
