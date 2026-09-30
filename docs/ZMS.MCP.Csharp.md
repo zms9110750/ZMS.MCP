@@ -1,5 +1,9 @@
 # ZMS.MCP.Csharp 工具手册 v3
 
+> ⚠ **已被 [`ZMS.MCP.Csharp.v4.md`](ZMS.MCP.Csharp.v4.md) 取代** —— 工具签名有几处变了（`symbols` 多了四个"要不要列出"的信息开关、
+> 去掉了 `read`；`edit_project_metadata` 改成两段式；三个 `dryRun` 被去掉；`confirm_draft` 去掉了 `apply`），
+> 而且 v4 起所有调用都受**工作空间边界**约束。这份留作历史对照。
+
 这份手册以**实机调用结果**写成：每个工具的参数取自运行时 schema，返回值示例是实际调用回来的原文（不是从代码推断的）。共 **19 个工具**。
 
 > 与 v1 / v2 的主要差别：`view_project` 与 `view_solution_tree` 已合并为 `view_project_or_solution`；`list_types` / `list_members` / `get_member` 已合并为单个 `symbols`；`scan_projects` 去掉了 `kinds` 参数。

@@ -25,8 +25,10 @@
     <PackageReference Include="ModelContextProtocol" Version="2.2.0" />
   </ItemGroup>
 
-  <!-- ===== 全局 Global.cs（所有项目共享：MCP global using + 通用入口） ===== -->
-  <ItemGroup>
+  <!-- ===== 全局 Global.cs（所有**生产**项目共享：MCP global using + 通用入口 + 工作空间边界） =====
+       测试项目不注入：它们引用被测程序集，internal 类型通过上面的 InternalsVisibleTo 就能看到；
+       注进来反而会在"源里的类型"和"引用程序集里的同名类型"之间产生 CS0436。 -->
+  <ItemGroup Condition="!$(MSBuildProjectName.EndsWith('.Test'))">
     <Compile Include="$(MSBuildThisFileDirectory)Global.cs" />
   </ItemGroup>
 
