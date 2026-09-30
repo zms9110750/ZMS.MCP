@@ -667,4 +667,98 @@ public sealed class DraftFlowTests
             new DraftStore().ClearTracking(project);
         }
     }
+
+    /// <summary>造一个"一个类被另一个类引用"的项目 —— 改名要有引用点才验得出东西。</summary>
+    private static string NewProjectWithReference(out string directory)
+    {
+        directory = Path.Combine(Path.GetTempPath(), "zms-mcp-rename-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        string project = Path.Combine(directory, "Demo.csproj");
+        File.WriteAllText(
+            project,
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net11.0</TargetFramework></PropertyGroup></Project>");
+        File.WriteAllText(
+            Path.Combine(directory, "Calculator.cs"),
+            "namespace Demo;\n\npublic class Calculator\n{\n    public int AddUp(int a, int b)\n    {\n        return a + b;\n    }\n\n    public int Zero()\n    {\n        return 0;\n    }\n}\n");
+        File.WriteAllText(
+            Path.Combine(directory, "Client.cs"),
+            "namespace Demo;\n\npublic class Client\n{\n    public int Use()\n    {\n        Calculator calculator = new Calculator();\n        return calculator.AddUp(1, 2) + new Calculator().AddUp(3, 4);\n    }\n}\n");
+        return project;
+    }
+
+    [Fact]
+    public void Rename_rewrites_the_declaration_and_every_reference()
+    {
+        string project = NewProjectWithReference(out string directory);
+        string calculator = Path.Combine(directory, "Calculator.cs");
+        string client = Path.Combine(directory, "Client.cs");
+        try
+        {
+            string cookie = TrackAndTakeCookie(project);
+            string staged = DraftService.Rename(cookie, "Demo.Calculator.AddUp(int, int)", "Sum");
+
+            Assert.Contains("AddUp → Sum", staged, StringComparison.Ordinal);
+            // 只是记下了这条改名：一个字节都还没碰
+            Assert.Contains("AddUp", File.ReadAllText(calculator), StringComparison.Ordinal);
+
+            string precheck = DraftService.Confirm(cookie, "");
+            Assert.Contains("落盘 cookie", precheck);
+            // 声明与引用点分处两个文件，两个都要在改动清单里
+            Assert.Contains("Calculator.cs", precheck, StringComparison.Ordinal);
+            Assert.Contains("Client.cs", precheck, StringComparison.Ordinal);
+
+            Assert.Contains("已落盘", DraftService.Confirm(cookie, TakeCookie(precheck)));
+
+            Assert.Contains("public int Sum(int a, int b)", File.ReadAllText(calculator), StringComparison.Ordinal);
+            string updated = File.ReadAllText(client);
+            Assert.DoesNotContain("AddUp", updated, StringComparison.Ordinal);
+            // 两处引用都要改到（不只第一处）
+            Assert.Equal(2, updated.Split("Sum(").Length - 1);
+        }
+        finally
+        {
+            new DraftStore().ClearTracking(project);
+        }
+    }
+
+    [Fact]
+    public void Rename_refuses_a_name_that_already_exists_on_the_same_type()
+    {
+        string project = NewProjectWithReference(out _);
+        try
+        {
+            string cookie = TrackAndTakeCookie(project);
+
+            InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
+                () => DraftService.Rename(cookie, "Demo.Calculator.AddUp(int, int)", "Zero"));
+
+            Assert.Contains("已经有叫", exception.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            new DraftStore().ClearTracking(project);
+        }
+    }
+
+    [Fact]
+    public void Rename_refuses_a_non_identifier_and_a_rename_to_the_same_name()
+    {
+        string project = NewProjectWithReference(out _);
+        try
+        {
+            string cookie = TrackAndTakeCookie(project);
+
+            InvalidOperationException invalid = Assert.Throws<InvalidOperationException>(
+                () => DraftService.Rename(cookie, "Demo.Calculator.AddUp(int, int)", "1Bad"));
+            Assert.Contains("合法的 C# 标识符", invalid.Message, StringComparison.Ordinal);
+
+            InvalidOperationException same = Assert.Throws<InvalidOperationException>(
+                () => DraftService.Rename(cookie, "Demo.Calculator.AddUp(int, int)", "AddUp"));
+            Assert.Contains("本来就叫", same.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            new DraftStore().ClearTracking(project);
+        }
+    }
 }

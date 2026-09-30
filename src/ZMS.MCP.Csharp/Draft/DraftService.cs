@@ -37,6 +37,12 @@ public static class DraftService
     private static readonly string[] Categories = ["增加", "删除", "修改"];
 
     /// <summary>
+    /// 拟定里"这条是**改名**"的标记（写在 `draft_edits.action` 列），此时 `RequestedContent` 存的是**新名字**。
+    /// 单独立一个标记而不是新加一列：`action` 本来就是"这条拟定是什么性质"的载体。
+    /// </summary>
+    internal const string RenameAction = "rename";
+
+    /// <summary>
     /// 一条改动属于哪一类。CodeEditor 的 action 是 removed / replaced / added 这类英文标记，
     /// 新建类型、新建内部类、补 partial 都归入"增加"。
     /// </summary>
@@ -45,7 +51,7 @@ public static class DraftService
         return edit.Action switch
         {
             "removed" => "删除",
-            "replaced" => "修改",
+            "replaced" or RenameAction => "修改",
             _ => "增加",
         };
     }
@@ -159,6 +165,76 @@ public static class DraftService
         builder.AppendLine();
         builder.AppendLine("- 落盘许可（若有）已作废：要落盘请重新 confirm_draft（不带 cookie）做预检。");
         return builder.ToString();
+    }
+
+    /// <summary>
+    /// 改名：把 `memberPath` 指到的符号（**连同它在本编译里的所有引用**）改成 `newName`。
+    ///
+    /// 它**不自己写盘** —— 往拟定里记一条「改名」，和 `stage_draft` 走同一条路：
+    /// 预检、冲突检测、落盘许可、原子写、journal 全部复用；
+    /// "到底要改哪些地方"留到预检/落盘现场才算（那时的编译才是最新的）。
+    /// </summary>
+    public static string Rename(string cookie, string memberPath, string newName)
+    {
+        DraftStore store = new();
+        string projectPath = RequireProjectByCookie(store, cookie, "rename_symbol");
+
+        string path = (memberPath ?? "").Trim();
+        if (path.Length == 0)
+        {
+            throw new InvalidOperationException("要给一个符号路径（memberPath）。");
+        }
+
+        string wanted = (newName ?? "").Trim();
+        if (!SyntaxFacts.IsValidIdentifier(wanted))
+        {
+            throw new InvalidOperationException($"'{newName}' 不是合法的 C# 标识符。");
+        }
+
+        LoadedProject project = LoadedProject.Load(projectPath);
+        ISymbol symbol = FindRenameTarget(project.Compilation, path);
+
+        if (symbol.Name.Equals(wanted, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"这个符号本来就叫 '{wanted}'，不用改。");
+        }
+
+        if (symbol.ContainingType is INamedTypeSymbol owner && owner.GetMembers(wanted).Length > 0)
+        {
+            throw new InvalidOperationException(
+                $"{SymbolLocator.DisplayName(owner)} 里已经有叫 '{wanted}' 的成员了 —— 换一个名字。");
+        }
+
+        string typePath = symbol.ContainingType == null ? "" : SymbolLocator.DisplayName(symbol.ContainingType);
+        string memberName = symbol is INamedTypeSymbol ? "" : symbol.Name;
+        string symbolKey = SymbolBaseline.Key(symbol);
+        string snapshot = SymbolBaseline.DeclaredText(symbol);
+
+        // 同一个符号只留一条生效条目（和其它拟定一样）
+        store.ReplaceSymbol(projectPath, typePath, memberName, wanted, symbolKey, snapshot, RenameAction);
+        PermitStore.Invalidate(projectPath);
+        ConflictService.AcceptCurrent(projectPath, symbolKey, SymbolBaseline.Capture(project.Compilation));
+
+        StringBuilder builder = new();
+        builder.AppendLine("# 已记下改名（还没落盘）");
+        builder.AppendLine($"- 项目：{projectPath}");
+        builder.AppendLine($"- 符号：{symbolKey}");
+        builder.AppendLine($"- 改名：{symbol.Name} → {wanted}");
+        builder.AppendLine($"- 拟定条数：{store.Find(projectPath)?.Edits.Count ?? 0}");
+        builder.AppendLine("- 要改的地方（声明 + 本编译里的引用）**现在还没算、也还没碰任何文件** —— 留到落盘现场。");
+        builder.AppendLine("- 落盘：先 confirm_draft（不带 applyCookie）做预检，拿回来的 applyCookie 再调一次。");
+        return builder.ToString();
+    }
+
+    /// <summary>把 `memberPath` 解析成一个要改名的具体符号（成员优先，退到类型）。</summary>
+    private static ISymbol FindRenameTarget(CSharpCompilation compilation, string memberPath)
+    {
+        ResolvedPath resolved = SymbolLocator.Resolve(compilation, memberPath);
+        string spec = resolved.MemberSpec.Trim();
+
+        return spec.Length == 0
+            ? resolved.Type
+            : SymbolLocator.ResolveSingleMember(resolved.Type, spec);
     }
 
     /// <summary>
@@ -852,10 +928,49 @@ public static class DraftService
             }
         }
 
+        AppendRenameSites(builder, record, plan);
+
         builder.AppendLine();
         builder.AppendLine("## 诊断对比（按 错误码 + 消息 + 文件 配对，行号只用于展示）");
         AppendDiagnostics(builder, "新增", after, before);
         AppendDiagnostics(builder, "消失", before, after);
+    }
+
+    /// <summary>
+    /// 把改名的"会动哪几处"摆出来（行:列 + 是声明还是引用）。
+    ///
+    /// 这是语义改名对文本替换的**唯一优势**：改的是符号，不是文本 ——
+    /// 同名但不相干的成员、字符串里和注释里的同名文字都不会被碰。
+    /// 坐标按**改名之前**的原文算（改完之后行号就没意义了）。
+    /// </summary>
+    private static void AppendRenameSites(StringBuilder builder, DraftRecord record, DraftPlanner.Plan plan)
+    {
+        List<DraftEdit> renames = [.. record.Edits.Where(edit => edit.Action == RenameAction)];
+        Dictionary<string, List<string>> sites = new(PathComparison.Comparer);
+        foreach (DraftPlanner.PlannedFile file in plan.Files)
+        {
+            if (file.RenameSites.Count > 0)
+            {
+                sites[file.FilePath] = [.. file.RenameSites];
+            }
+        }
+
+        if (renames.Count == 0 || sites.Count == 0)
+        {
+            return;
+        }
+
+        builder.AppendLine();
+        builder.AppendLine("## 改名的改动点（声明 + 引用；不是文本替换）");
+        foreach (DraftEdit rename in renames)
+        {
+            builder.AppendLine($"- {rename.TypePath}.{rename.MemberName} → {rename.RequestedContent}");
+        }
+
+        foreach (KeyValuePair<string, List<string>> file in sites)
+        {
+            builder.AppendLine($"  - {file.Key}：{string.Join("、", file.Value)}");
+        }
     }
 
     /// <summary>把一条拟定算成若干次文件改动（改成员 / 删成员 / 新增成员 / 新建类型都可能牵扯多个文件）。</summary>

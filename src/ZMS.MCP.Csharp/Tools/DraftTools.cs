@@ -46,6 +46,23 @@ public static class DraftTools
         return ToolGuard.Run(() => DraftService.Stage(cookie, typePath, memberName, content));
     }
 
+    [McpServerTool(ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
+    [Description(
+        "Rename a symbol: records one rename entry in the draft, covering the declaration plus every reference " +
+        "inside this compilation (strings, comments, non-C# files and other projects are out of scope). " +
+        "cookie = the tracking cookie returned by track_project (the same cookie clears the tracking); no csprojPath is needed. " +
+        "memberPath = a symbol path exactly as the symbol tool reports it, e.g. 'My.Ns.Type.Member(int)' or 'My.Ns.Type'. " +
+        "newName = the new name, without a parameter list. " +
+        "It never writes to disk by itself: the edit sites are computed at apply time and the write still goes " +
+        "through confirm_draft, exactly like every other draft entry.")]
+    public static string RenameSymbol(
+        [Description("Tracking cookie from track_project")] string cookie,
+        [Description("Symbol path, e.g. 'My.Ns.Type.Member(int)' or 'My.Ns.Type'")] string memberPath,
+        [Description("New name, without a parameter list")] string newName)
+    {
+        return ToolGuard.Run(() => DraftService.Rename(cookie, memberPath, newName));
+    }
+
     [McpServerTool(ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
         "List the pending draft of a project, including its cookit - this is how an agent that restarted " +
