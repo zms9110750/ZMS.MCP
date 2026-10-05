@@ -57,6 +57,19 @@ public static partial class WorkflowValidator
 
             CheckPermissions(problems, $"jobs.{id}.permissions", job.Permissions);
 
+            if (job.Strategy is { } strategy
+                && strategy.MatrixExpression is { Count: > 0 } expressions
+                && strategy.Matrix is { Count: > 0 } values)
+            {
+                foreach (string name in expressions.Keys)
+                {
+                    if (values.ContainsKey(name))
+                    {
+                        problems.Add($"jobs.{id}.strategy.matrix：'{name}' 这一维既在 matrix 里列了取值、又在 matrixExpression 里给了表达式，只能给一种。");
+                    }
+                }
+            }
+
             if (job.Container is { } container && string.IsNullOrWhiteSpace(container.Image))
             {
                 problems.Add($"jobs.{id}.container：缺 image。");

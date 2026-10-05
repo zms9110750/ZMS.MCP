@@ -186,10 +186,22 @@ public static class WorkflowTools
         return count;
     }
 
+    /// <summary>通用形状的那批事件（与模型里的 <c>Triggers.Other</c> 对应）。</summary>
+    private static readonly HashSet<string> GenericTriggers =
+    [
+        "branch_protection_rule", "check_run", "check_suite", "create", "delete", "deployment",
+        "deployment_status", "discussion", "discussion_comment", "fork", "gollum", "issue_comment",
+        "issues", "label", "merge_group", "milestone", "page_build", "project", "project_card",
+        "project_column", "public", "pull_request_review", "pull_request_review_comment",
+        "pull_request_target", "registry_package", "release", "repository_dispatch", "status", "watch",
+    ];
+
     private static string TriggerList()
     {
         return """
             # 触发器（on）
+
+            ## 单独建模的（形状不一样，各有各的写法）
 
             - `push` —— 推到分支或打标签
             - `pull_request` —— 开/更新 PR
@@ -198,13 +210,40 @@ public static class WorkflowTools
             - `workflow_call` —— 被别的流水线复用（自己的 inputs / secrets / outputs）
             - `workflow_run` —— 盯别的流水线跑完
 
-            用 value 看某一个触发器接受什么，例如 value = `push`。
+            ## 其余事件（形状一样：types / branches / paths / tags 几档过滤）
+
+            它们都写进 `on.other.<事件名>`，能用的名字是：
+
+            `branch_protection_rule` `check_run` `check_suite` `create` `delete` `deployment`
+            `deployment_status` `discussion` `discussion_comment` `fork` `gollum` `issue_comment`
+            `issues` `label` `merge_group` `milestone` `page_build` `project` `project_card`
+            `project_column` `public` `pull_request_review` `pull_request_review_comment`
+            `pull_request_target` `registry_package` `release` `repository_dispatch` `status` `watch`
+
+            用 value 看某一个接受什么，例如 value = `release`。
             """;
     }
 
     private static string TriggerDetail(string name)
     {
-        return name switch
+        string lowered = name.Trim().ToLowerInvariant().Replace('-', '_');
+        if (GenericTriggers.Contains(lowered))
+        {
+            return $"""
+                # {lowered}
+
+                这是通用形状的事件，写进 `on.other.{lowered}`：
+
+                - `types` —— 动作类型（每个事件能用的取值不同，见 GitHub 的文档；例如 `release` 是
+                  `published` / `created` / `edited` / `deleted` / `prereleased` / `released`，
+                  `issues` 是 `opened` / `edited` / `closed` / `reopened` / `labeled` 等）
+                - `branches` / `branches-ignore`
+                - `paths` / `paths-ignore`
+                - `tags` / `tags-ignore`
+                """;
+        }
+
+        return lowered switch
         {
             "push" => """
                 # push

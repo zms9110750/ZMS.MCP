@@ -26,20 +26,54 @@ public sealed class Workflow
     public SortedDictionary<string, Job> Jobs { get; set; } = [];
 }
 
-/// <summary><c>on</c>：可用触发器（先做这六个，覆盖九成场景）。</summary>
+/// <summary><c>on</c>：可用触发器。</summary>
 public sealed class Triggers
 {
+    /// <summary>有 branches / paths / tags 三档过滤的那一个（形状最全，单独给）。</summary>
     public PushTrigger? Push { get; set; }
 
+    /// <summary>比 push 多一档 types。</summary>
     public PullRequestTrigger? PullRequest { get; set; }
 
+    /// <summary>手动触发，可以带输入。</summary>
     public WorkflowDispatchTrigger? WorkflowDispatch { get; set; }
 
+    /// <summary>按 cron 定时。</summary>
     public List<string>? Schedule { get; set; }
 
+    /// <summary>被别的流水线复用（自己的 inputs / secrets / outputs）。</summary>
     public WorkflowCallTrigger? WorkflowCall { get; set; }
 
+    /// <summary>盯别的流水线跑完。</summary>
     public WorkflowRunTrigger? WorkflowRun { get; set; }
+
+    /// <summary>
+    /// 其余事件（<c>release</c> / <c>issues</c> / <c>label</c> / <c>check_run</c> / <c>discussion</c> /
+    /// <c>deployment</c> / <c>merge_group</c> / <c>repository_dispatch</c> / <c>registry_package</c> /
+    /// <c>fork</c> / <c>gollum</c> 等等）：形状都一样 —— 名字 → 它的过滤条件。
+    /// **可以填哪些名字**由 <c>list_workflow_schema(trigger)</c> 给全表；这里故意做成开放字典，
+    /// 免得官方每加一个事件就得改一次模型。
+    /// </summary>
+    public SortedDictionary<string, SimpleTrigger>? Other { get; set; }
+}
+
+/// <summary>通用触发器：只带过滤条件的那些事件都用它。</summary>
+public sealed class SimpleTrigger
+{
+    /// <summary>动作类型，如 <c>opened</c> / <c>published</c> / <c>completed</c>。</summary>
+    public List<string>? Types { get; set; }
+
+    public List<string>? Branches { get; set; }
+
+    public List<string>? BranchesIgnore { get; set; }
+
+    public List<string>? Paths { get; set; }
+
+    public List<string>? PathsIgnore { get; set; }
+
+    public List<string>? Tags { get; set; }
+
+    public List<string>? TagsIgnore { get; set; }
 }
 
 /// <summary><c>push</c>。</summary>
@@ -185,8 +219,18 @@ public sealed class Job
 /// <summary><c>strategy</c>：矩阵与并发度。</summary>
 public sealed class Strategy
 {
-    /// <summary><c>matrix</c>：每个键对应一串取值。用有序字典 —— 矩阵的键序不能随插入次序变。</summary>
+    /// <summary>
+    /// <c>matrix</c> 里**把取值列出来**的那些维度：每个键对应一串取值。
+    /// 用有序字典 —— 矩阵的键序不能随插入次序变。
+    /// </summary>
     public SortedDictionary<string, List<string>>? Matrix { get; set; }
+
+    /// <summary>
+    /// <c>matrix</c> 里**交给表达式算**的那些维度：值写成一个表达式，
+    /// 例如 <c>${{ fromJson(needs.build.outputs.tfm_json) }}</c>。
+    /// 与 <see cref="Matrix"/> 一起写进 yaml 的同一个 <c>matrix</c> 下，两边键不能重。
+    /// </summary>
+    public SortedDictionary<string, string>? MatrixExpression { get; set; }
 
     public bool? FailFast { get; set; }
 

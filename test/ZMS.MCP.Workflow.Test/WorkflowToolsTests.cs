@@ -147,6 +147,10 @@ public class WorkflowToolsTests : IDisposable
         Assert.Contains("runs-on", WorkflowTools.ListWorkflowSchema("field", "job"), StringComparison.Ordinal);
         Assert.Contains("checkout", WorkflowTools.ListWorkflowSchema("action", "checkout"), StringComparison.Ordinal);
 
+        // 通用形状的那批事件也在表里，且定位时指向 on.other.<名字>
+        Assert.Contains("release", WorkflowTools.ListWorkflowSchema("trigger"), StringComparison.Ordinal);
+        Assert.Contains("on.other.release", WorkflowTools.ListWorkflowSchema("trigger", "release"), StringComparison.Ordinal);
+
         Assert.Throws<ArgumentException>(() => WorkflowTools.ListWorkflowSchema("nonsense"));
         Assert.Throws<ArgumentException>(() => WorkflowTools.ListWorkflowSchema("trigger", "nope"));
     }

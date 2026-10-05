@@ -168,6 +168,22 @@ public static class WorkflowWriter
                     List(emitter, "branches-ignore", triggers.WorkflowRun.BranchesIgnore);
                 });
             }
+
+            // 其余事件：形状一样，逐个写
+            foreach ((string name, SimpleTrigger trigger) in triggers.Other ?? [])
+            {
+                Key(emitter, name);
+                Map(emitter, () =>
+                {
+                    List(emitter, "types", trigger.Types);
+                    List(emitter, "branches", trigger.Branches);
+                    List(emitter, "branches-ignore", trigger.BranchesIgnore);
+                    List(emitter, "paths", trigger.Paths);
+                    List(emitter, "paths-ignore", trigger.PathsIgnore);
+                    List(emitter, "tags", trigger.Tags);
+                    List(emitter, "tags-ignore", trigger.TagsIgnore);
+                });
+            }
         });
     }
 
@@ -189,12 +205,19 @@ public static class WorkflowWriter
                 Key(emitter, "strategy");
                 Map(emitter, () =>
                 {
-                    if (job.Strategy.Matrix is { Count: > 0 } matrix)
+                    if (job.Strategy.Matrix is { Count: > 0 } || job.Strategy.MatrixExpression is { Count: > 0 })
                     {
                         Key(emitter, "matrix");
                         Map(emitter, () =>
                         {
-                            foreach ((string name, List<string> values) in matrix)
+                            // 表达式那一档先写：它是整维交给表达式算的
+                            foreach ((string name, string expression) in job.Strategy.MatrixExpression ?? [])
+                            {
+                                ScalarText(emitter, name, expression);
+                            }
+
+                            // 再写把取值列出来的那一档
+                            foreach ((string name, List<string> values) in job.Strategy.Matrix ?? [])
                             {
                                 List(emitter, name, values);
                             }

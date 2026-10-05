@@ -75,6 +75,68 @@ public class WorkflowWriterTests
     }
 
     [Fact]
+    public void matrix_的表达式那一维也能写出来()
+    {
+        WorkflowDocument workflow = new()
+        {
+            On = new Triggers { Push = new PushTrigger() },
+            Jobs = new SortedDictionary<string, Job>
+            {
+                ["build"] = new Job
+                {
+                    RunsOn = "ubuntu-latest",
+                    Strategy = new Strategy
+                    {
+                        MatrixExpression = new SortedDictionary<string, string>
+                        {
+                            ["fw"] = "${{ fromJson(needs.build.outputs.tfm_json) }}",
+                        },
+                        Matrix = new SortedDictionary<string, List<string>>
+                        {
+                            ["rid"] = ["win-x64", "linux-x64"],
+                        },
+                        FailFast = false,
+                    },
+                    Steps = [new Step { Run = "echo" }],
+                },
+            },
+        };
+
+        string yaml = WorkflowWriter.Write(workflow);
+
+        Assert.Contains("fw: ${{ fromJson(needs.build.outputs.tfm_json) }}", yaml, StringComparison.Ordinal);
+        Assert.Contains("rid:", yaml, StringComparison.Ordinal);
+        Assert.Contains("fail-fast: false", yaml, StringComparison.Ordinal);
+        Assert.Empty(WorkflowValidator.Check(workflow));
+    }
+
+    [Fact]
+    public void matrix_同一维两种写法会被校验拒掉()
+    {
+        WorkflowDocument workflow = new()
+        {
+            On = new Triggers { Push = new PushTrigger() },
+            Jobs = new SortedDictionary<string, Job>
+            {
+                ["build"] = new Job
+                {
+                    RunsOn = "ubuntu-latest",
+                    Strategy = new Strategy
+                    {
+                        Matrix = new SortedDictionary<string, List<string>> { ["fw"] = ["a"] },
+                        MatrixExpression = new SortedDictionary<string, string> { ["fw"] = "${{ fromJson('[]') }}" },
+                    },
+                    Steps = [new Step { Run = "echo" }],
+                },
+            },
+        };
+
+        Assert.Contains(
+            WorkflowValidator.Check(workflow),
+            problem => problem.Contains("只能给一种", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void 多行内容用块标量_换行不被折成空格()
     {
         WorkflowDocument workflow = new()
