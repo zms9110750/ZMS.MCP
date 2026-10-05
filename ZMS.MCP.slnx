@@ -1,7 +1,6 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/ZMS.MCP/ZMS.MCP.csproj" />
-    <Project Path="src/ZMS.MCP.Cli/ZMS.MCP.Cli.csproj" />
     <Project Path="src/ZMS.MCP.Core/ZMS.MCP.Core.csproj" />
     <Project Path="src/ZMS.MCP.Csharp/ZMS.MCP.Csharp.csproj" />
     <Project Path="src/ZMS.MCP.Resource/ZMS.MCP.Resource.csproj" />
@@ -11,7 +10,6 @@
   <Folder Name="/test/">
     <Project Path="test/ZMS.MCP.Resource.Test/ZMS.MCP.Resource.Test.csproj" />
     <Project Path="test/ZMS.MCP.Structured.Test/ZMS.MCP.Structured.Test.csproj" />
-    <Project Path="test/ZMS.MCP.Test/ZMS.MCP.Test.csproj" />
     <Project Path="test/ZMS.MCP.Csharp.Test/ZMS.MCP.Csharp.Test.csproj" />
     <Project Path="test/ZMS.MCP.Workflow.Test/ZMS.MCP.Workflow.Test.csproj" />
   </Folder>

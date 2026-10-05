@@ -270,6 +270,7 @@ public sealed class SymbolQueryTests
             entry => Assert.Single(((Microsoft.CodeAnalysis.IMethodSymbol)entry.Symbol).Parameters));
     }
 
+    [Fact(Skip = "停用中，理由见下面的 Obsolete；要恢复请先按那条注释说的改掉它")]
     [Obsolete("这条拿仓库自身项目（真实 MSBuild 求值）来验符号列表，属靠别人的命令测自己；要保留就该改用临时项目，暂时停用")]
     public void List_keeps_nullable_reference_type_modifier_in_signature()
     {

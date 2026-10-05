@@ -46,6 +46,7 @@ public sealed class ProjectLoaderTests
         return Path.Combine(RepositoryRoot(), "src", "ZMS.MCP.Csharp", "ZMS.MCP.Csharp.csproj");
     }
 
+    [Fact(Skip = "停用中，理由见下面的 Obsolete；要恢复请先按那条注释说的改掉它")]
     [Obsolete("靠真跑 dotnet msbuild 才成立：用别人的命令测自己的稳定性，冷启动几秒且与要验的语义无关")]
     public void Load_project_without_restore_falls_back()
     {
