@@ -123,11 +123,17 @@ Error: 路径不在本次会话的工作区里：C:\Users\16229\source\OpenSourc
 **实测输出**（`path=C:\Users\16229\source\OpenSourceLibrary\ZMS.MCP`，`depth=2`）：
 
 ```
-ZMS.MCP.slnx(4+0)
-├─src/ZMS.MCP.Cli/ZMS.MCP.Cli.csproj
+ZMS.MCP.slnx(10+0)
+├─src/ZMS.MCP/ZMS.MCP.csproj
+├─src/ZMS.MCP.Core/ZMS.MCP.Core.csproj
 ├─src/ZMS.MCP.Csharp/ZMS.MCP.Csharp.csproj
-├─test/ZMS.MCP.Test/ZMS.MCP.Test.csproj
-└─test/ZMS.MCP.Csharp.Test/ZMS.MCP.Csharp.Test.csproj
+├─src/ZMS.MCP.Resource/ZMS.MCP.Resource.csproj
+├─src/ZMS.MCP.Structured/ZMS.MCP.Structured.csproj
+├─src/ZMS.MCP.Workflow/ZMS.MCP.Workflow.csproj
+├─test/ZMS.MCP.Resource.Test/ZMS.MCP.Resource.Test.csproj
+├─test/ZMS.MCP.Structured.Test/ZMS.MCP.Structured.Test.csproj
+├─test/ZMS.MCP.Csharp.Test/ZMS.MCP.Csharp.Test.csproj
+└─test/ZMS.MCP.Workflow.Test/ZMS.MCP.Workflow.Test.csproj
 ```
 
 一个都没扫到时只有一行：
