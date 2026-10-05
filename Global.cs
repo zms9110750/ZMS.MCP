@@ -4,6 +4,7 @@
 // 3) 工作空间边界——统一校验每次工具调用涉及的路径参数。
 global using System.ComponentModel;
 global using System.IO;
+global using System.Reflection;
 global using System.Text.Json;
 global using System.Text.Json.Nodes;
 global using Microsoft.Extensions.DependencyInjection;
@@ -25,17 +26,28 @@ internal static class McpStdioServer
     /// </summary>
     /// <param name="args">命令行参数，透传给 <see cref="Host.CreateApplicationBuilder(string[])"/>。</param>
     /// <param name="configure">可选：追加自定义配置，如请求/消息过滤器。</param>
-    public static async Task RunAsync(string[] args, Action<IMcpServerBuilder>? configure = null)
+    /// <param name="toolAssemblies">
+    /// 工具在哪些程序集里。**留空 = 只扫本程序集**（各项目独立启动时就是这样）；
+    /// 聚合项目（<c>ZMS.MCP</c>）把自己的程序集和它引用的那几个都传进来。
+    /// </param>
+    public static async Task RunAsync(
+        string[] args,
+        Action<IMcpServerBuilder>? configure = null,
+        params Assembly[] toolAssemblies)
     {
-        await Build(args, configure).RunAsync();
+        await Build(args, configure, toolAssemblies).RunAsync();
     }
 
     /// <summary>
-    /// 构建 Host（未启动）。默认已注册：stdio 传输 + 扫描本程序集里的全部 MCP 工具 + 工作空间边界检查。
+    /// 构建 Host（未启动）。默认已注册：stdio 传输 + MCP 工具 + 工作空间边界检查。
     /// </summary>
     /// <param name="args">命令行参数。</param>
     /// <param name="configure">可选：追加自定义配置，如请求/消息过滤器。</param>
-    public static IHost Build(string[] args, Action<IMcpServerBuilder>? configure = null)
+    /// <param name="toolAssemblies">工具在哪些程序集里；留空 = 只扫本程序集。</param>
+    public static IHost Build(
+        string[] args,
+        Action<IMcpServerBuilder>? configure = null,
+        params Assembly[] toolAssemblies)
     {
         HostApplicationBuilder builder = Host.CreateApplicationBuilder(args);
 
@@ -47,8 +59,23 @@ internal static class McpStdioServer
 
         IMcpServerBuilder mcp = builder.Services
             .AddMcpServer()
-            .WithStdioServerTransport()
-            .WithToolsFromAssembly()
+            .WithStdioServerTransport();
+
+        if (toolAssemblies.Length == 0)
+        {
+            // 各项目独立启动：工具就在自己这个程序集里
+            mcp = mcp.WithToolsFromAssembly();
+        }
+        else
+        {
+            // 聚合启动：工具分散在引用的几个程序集里，逐个挂
+            foreach (Assembly assembly in toolAssemblies)
+            {
+                mcp = mcp.WithToolsFromAssembly(assembly);
+            }
+        }
+
+        mcp = mcp
             // 所有工具调用都先过这一道：路径参数必须在工作空间边界内。
             // 它拦在**工具体之前**（next 才是工具），所以越界时工具一个字节都不会碰。
             .WithRequestFilters(filters => filters.AddCallToolFilter(next =>

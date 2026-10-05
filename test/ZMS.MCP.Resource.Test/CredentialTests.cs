@@ -1,5 +1,5 @@
 using Xunit;
-using ZMS.MCP.Resource.Credentials;
+using ZMS.MCP.Core.Credentials;
 
 namespace ZMS.MCP.Resource.Test;
 

@@ -6,7 +6,7 @@ using SharpCompress.Writers;
 using SharpCompress.Writers.SevenZip;
 using SharpCompress.Writers.Tar;
 using SharpCompress.Writers.Zip;
-using ZMS.MCP.Resource.Credentials;
+using ZMS.MCP.Core.Credentials;
 
 namespace ZMS.MCP.Resource.Archive;
 

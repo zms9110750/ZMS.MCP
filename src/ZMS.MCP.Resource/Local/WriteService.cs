@@ -1,5 +1,5 @@
 using System.Text.RegularExpressions;
-using ZMS.MCP.Resource.Credentials;
+using ZMS.MCP.Core.Credentials;
 using ZMS.MCP.Resource.Targeting;
 
 namespace ZMS.MCP.Resource.Local;

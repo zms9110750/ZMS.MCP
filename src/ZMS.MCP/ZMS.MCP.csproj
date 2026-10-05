@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Description>ZMS.MCP — 聚合入口：一个进程同时提供 Csharp / Structured / Resource / Workflow 四组工具</Description>
+  </PropertyGroup>
+
+  <!-- 只引这四个项目，不额外引包：它们各自的依赖会被带过来，而共享的那份依赖（ModelContextProtocol、
+       各项目共同的部分）在整个输出目录里只有一份。 -->
+  <ItemGroup>
+    <ProjectReference Include="..\ZMS.MCP.Csharp\ZMS.MCP.Csharp.csproj" />
+    <ProjectReference Include="..\ZMS.MCP.Resource\ZMS.MCP.Resource.csproj" />
+    <ProjectReference Include="..\ZMS.MCP.Structured\ZMS.MCP.Structured.csproj" />
+    <ProjectReference Include="..\ZMS.MCP.Workflow\ZMS.MCP.Workflow.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -4,7 +4,7 @@ using ModelContextProtocol.Server;
 using YamlDotNet.Core;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
-using ZMS.MCP.Workflow.Credentials;
+using ZMS.MCP.Core.Credentials;
 using ZMS.MCP.Workflow.Models;
 using ZMS.MCP.Workflow.Yaml;
 using WorkflowDocument = ZMS.MCP.Workflow.Models.Workflow;
@@ -62,7 +62,7 @@ public static class WorkflowTools
 
         if (File.Exists(full))
         {
-            string current = Cookie.Of(full);
+            string current = Cookie.OfFile(full);
             if (string.IsNullOrWhiteSpace(cookie))
             {
                 FileInfo existing = new(full);
@@ -81,11 +81,11 @@ public static class WorkflowTools
                     + $"- 现在算出来：`{current}` —— 这期间它被改过，或者你给的是别的东西的凭据。\n";
             }
         }
-        else if (!string.IsNullOrWhiteSpace(cookie) && !Cookie.Matches(cookie, Cookie.Of(full)))
+        else if (!string.IsNullOrWhiteSpace(cookie) && !Cookie.Matches(cookie, Cookie.OfFile(full)))
         {
             return "# 没有写（凭据对不上）\n"
                 + $"- 目标：{full}（现在不存在）\n"
-                + $"- 你给的凭据不是「文件不存在」那一档的；那一档的凭据是 `{Cookie.Of(full)}`。\n";
+                + $"- 你给的凭据不是「文件不存在」那一档的；那一档的凭据是 `{Cookie.OfFile(full)}`。\n";
         }
 
         Directory.CreateDirectory(Path.GetDirectoryName(full)!);
@@ -95,7 +95,7 @@ public static class WorkflowTools
         builder.AppendLine("# 已生成");
         builder.AppendLine($"- 文件：{full}");
         builder.AppendLine($"- 作业：{tree.Jobs.Count} 个（{string.Join(", ", tree.Jobs.Keys)}）");
-        builder.AppendLine($"- 它的凭据（要再改一次就带上）：`{Cookie.Of(full)}`");
+        builder.AppendLine($"- 它的凭据（要再改一次就带上）：`{Cookie.OfFile(full)}`");
         builder.AppendLine("- 提示：内容与这棵树一一对应；改内容请改树再生成，不要手改 yaml。");
         return builder.ToString();
     }

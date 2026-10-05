@@ -1,5 +1,5 @@
 using Xunit;
-using ZMS.MCP.Resource.Credentials;
+using ZMS.MCP.Core.Credentials;
 using ZMS.MCP.Resource.Local;
 using ZMS.MCP.Resource.Targeting;
 

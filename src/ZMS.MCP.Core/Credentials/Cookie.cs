@@ -1,4 +1,8 @@
-namespace ZMS.MCP.Resource.Credentials;
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
+
+namespace ZMS.MCP.Core.Credentials;
 
 /// <summary>
 /// 凭据（<c>cookie</c>）：一次读取换来的短标识，改到已有内容时要带回来。
@@ -10,6 +14,9 @@ namespace ZMS.MCP.Resource.Credentials;
 /// 两段分开放，是为了让两档凭据**能互相校验**：比的时候元数据段必须一致，
 /// **两边都有内容段时**内容段也必须一致 —— 只读过元数据的那一档照样能验过。
 /// 修改时间进了元数据段：哪怕内容一字没动，只要被人改过，就对不上。
+///
+/// 文件**不存在**也是一种可表达的状态：那时凭据落的是 <see cref="Missing"/> 那一档，
+/// 新建就凭它。<see cref="OfFile"/> 会自己看文件，替调用方判断是哪一档。
 /// </summary>
 public static class Cookie
 {
@@ -18,6 +25,9 @@ public static class Cookie
 
     /// <summary>两段之间的分隔符。</summary>
     public const char Separator = '-';
+
+    /// <summary>文件不存在时用的那一格。</summary>
+    public const string Missing = "none";
 
     /// <summary>按「路径 + 大小 + 修改时间（+ 内容与编码）」算一个凭据。</summary>
     /// <param name="content">读过全文才有；没读就是 <c>null</c>，这时凭据只有元数据段。</param>
@@ -32,6 +42,19 @@ public static class Cookie
         }
 
         return metadata + Separator + Fingerprint($"{encoding ?? ""}\n{content}");
+    }
+
+    /// <summary>
+    /// 自己去看这个文件，按它的现状算凭据；**不存在**时算 <see cref="Missing"/> 那一档。
+    /// 那些「改动的是整份文件、不是文本里的某几处」的调用方（例如写工作流 yaml）走这一条。
+    /// </summary>
+    public static string OfFile(string path)
+    {
+        FileInfo file = new(path);
+        return file.Exists
+            ? Fingerprint(
+                $"{NormalizePath(path)}\n{file.Length.ToString(CultureInfo.InvariantCulture)}\n{file.LastWriteTimeUtc.Ticks.ToString(CultureInfo.InvariantCulture)}")
+            : Fingerprint($"{NormalizePath(path)}\n{Missing}");
     }
 
     /// <summary>两个凭据对不对得上（去空白、大小写不敏感；内容段只有两边都有时才比）。</summary>
