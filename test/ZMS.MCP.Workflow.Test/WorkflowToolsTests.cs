@@ -59,7 +59,43 @@ public class WorkflowToolsTests : IDisposable
         string output = WorkflowTools.WriteWorkflow(file, Good());
 
         Assert.Contains("目标已存在", output, StringComparison.Ordinal);
+        Assert.Contains("整份替换", output, StringComparison.Ordinal);
         Assert.Equal("原样", File.ReadAllText(file));
+    }
+
+    [Fact]
+    public void 带对凭据就能覆盖已有文件()
+    {
+        string file = Path.Combine(_root, "改过.yml");
+        File.WriteAllText(file, "原样");
+
+        string refused = WorkflowTools.WriteWorkflow(file, Good());
+        string cookie = ReadCookie(refused);
+
+        string output = WorkflowTools.WriteWorkflow(file, Good(), cookie);
+
+        Assert.Contains("已生成", output, StringComparison.Ordinal);
+        Assert.Contains("\njobs:\n", File.ReadAllText(file), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void 凭据对不上就拒写()
+    {
+        string file = Path.Combine(_root, "别人改过.yml");
+        File.WriteAllText(file, "原样");
+
+        string output = WorkflowTools.WriteWorkflow(file, Good(), "0123456789abcdef");
+
+        Assert.Contains("凭据对不上", output, StringComparison.Ordinal);
+        Assert.Equal("原样", File.ReadAllText(file));
+    }
+
+    /// <summary>把工具那句人话里反引号内的凭据抠出来（模拟"上一次调用给了我一个 cookie"）。</summary>
+    private static string ReadCookie(string message)
+    {
+        int start = message.IndexOf('`');
+        int end = message.IndexOf('`', start + 1);
+        return start >= 0 && end > start ? message[(start + 1)..end] : "";
     }
 
     [Fact]

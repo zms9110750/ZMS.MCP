@@ -4,6 +4,7 @@ using ModelContextProtocol.Server;
 using YamlDotNet.Core;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
+using ZMS.MCP.Workflow.Credentials;
 using ZMS.MCP.Workflow.Models;
 using ZMS.MCP.Workflow.Yaml;
 using WorkflowDocument = ZMS.MCP.Workflow.Models.Workflow;
@@ -37,16 +38,19 @@ public static class WorkflowTools
         };
     }
 
-    [McpServerTool(ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
+    [McpServerTool(ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]
     [Description(
         "Write a GitHub Actions workflow yaml from a tree. The tree is this tool's own 'tree' parameter - its JSON " +
         "schema (shown when the tools are listed) is the reference for what the tree may contain. The yaml is produced " +
         "deterministically: the same tree always yields the same bytes (2-space indent, LF line endings, key order " +
         "fixed by the writer). The tree is checked first: if it does not hold up, nothing is written and the problems " +
-        "are returned instead. The target file must not exist yet - this tool does not overwrite.")]
+        "are returned instead. If the target file does not exist, it is created. If it DOES exist, this tool refuses " +
+        "unless you pass the cookie that a previous call gave you for that exact file - that cookie is the proof you " +
+        "know what you are replacing; a call without it returns what would be overwritten and writes nothing.")]
     public static string WriteWorkflow(
-        [Description("Where to write the yaml. Absolute path of a .yml / .yaml file that does not exist yet.")] string path,
-        [Description("The workflow tree: name / on / env / permissions / jobs, where each job has runs-on and steps.")] WorkflowDocument tree)
+        [Description("Where to write the yaml. Absolute path of a .yml / .yaml file.")] string path,
+        [Description("The workflow tree: name / on / env / permissions / jobs, where each job has runs-on and steps.")] WorkflowDocument tree,
+        [Description("The cookie for the existing file. Only needed (and only honoured) when the target already exists.")] string? cookie = null)
     {
         IReadOnlyList<string> problems = WorkflowValidator.Check(tree);
         if (problems.Count > 0)
@@ -55,9 +59,33 @@ public static class WorkflowTools
         }
 
         string full = Path.GetFullPath(path);
+
         if (File.Exists(full))
         {
-            return $"# 没有写（目标已存在）\n- {full}\n- 这个工具不覆盖已有文件：先改名或删掉它，再生成。\n";
+            string current = Cookie.Of(full);
+            if (string.IsNullOrWhiteSpace(cookie))
+            {
+                FileInfo existing = new(full);
+                return "# 没有写（目标已存在，没给凭据）\n"
+                    + $"- 目标：{full}\n"
+                    + $"- 它现在的样子：{existing.Length} 字节，改于 {existing.LastWriteTime:yyyy-MM-dd HH:mm:ss}\n"
+                    + $"- 它的凭据是 `{current}`。要覆盖就把这个 cookie 带上再来一次；\n"
+                    + "  这份内容会被**整份替换**（不可回滚，没有回收站可救）。\n";
+            }
+
+            if (!Cookie.Matches(cookie, current))
+            {
+                return "# 没有写（凭据对不上）\n"
+                    + $"- 目标：{full}\n"
+                    + $"- 你给的：`{cookie.Trim()}`\n"
+                    + $"- 现在算出来：`{current}` —— 这期间它被改过，或者你给的是别的东西的凭据。\n";
+            }
+        }
+        else if (!string.IsNullOrWhiteSpace(cookie) && !Cookie.Matches(cookie, Cookie.Of(full)))
+        {
+            return "# 没有写（凭据对不上）\n"
+                + $"- 目标：{full}（现在不存在）\n"
+                + $"- 你给的凭据不是「文件不存在」那一档的；那一档的凭据是 `{Cookie.Of(full)}`。\n";
         }
 
         Directory.CreateDirectory(Path.GetDirectoryName(full)!);
@@ -67,6 +95,7 @@ public static class WorkflowTools
         builder.AppendLine("# 已生成");
         builder.AppendLine($"- 文件：{full}");
         builder.AppendLine($"- 作业：{tree.Jobs.Count} 个（{string.Join(", ", tree.Jobs.Keys)}）");
+        builder.AppendLine($"- 它的凭据（要再改一次就带上）：`{Cookie.Of(full)}`");
         builder.AppendLine("- 提示：内容与这棵树一一对应；改内容请改树再生成，不要手改 yaml。");
         return builder.ToString();
     }
