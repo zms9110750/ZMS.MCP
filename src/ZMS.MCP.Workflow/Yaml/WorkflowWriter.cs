@@ -432,9 +432,14 @@ public static class WorkflowWriter
         emitter.Emit(new Scalar(null, null, name, ScalarStyle.Plain, true, false));
     }
 
-    /// <summary>标量交给 emitter 决定引号 —— 同一套规则，所以同一个值两次的写法一样。</summary>
+    /// <summary>
+    /// 标量交给 emitter 决定引号 —— 同一套规则，所以同一个值两次的写法一样。
+    /// 但**多行内容必须用块标量**（<c>|</c>）：折叠标量（<c>&gt;-</c>）会把换行折成空格，
+    /// 那会让一段脚本从三行变成一行，语义就变了。
+    /// </summary>
     private static void Scalar(Emitter emitter, string value)
     {
-        emitter.Emit(new Scalar(null, null, value, ScalarStyle.Any, true, false));
+        ScalarStyle style = value.Contains('\n') ? ScalarStyle.Literal : ScalarStyle.Any;
+        emitter.Emit(new Scalar(null, null, value, style, true, false));
     }
 }

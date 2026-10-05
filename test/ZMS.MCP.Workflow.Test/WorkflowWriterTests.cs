@@ -75,6 +75,31 @@ public class WorkflowWriterTests
     }
 
     [Fact]
+    public void 多行内容用块标量_换行不被折成空格()
+    {
+        WorkflowDocument workflow = new()
+        {
+            On = new Triggers { Push = new PushTrigger() },
+            Jobs = new SortedDictionary<string, Job>
+            {
+                ["build"] = new Job
+                {
+                    RunsOn = "ubuntu-latest",
+                    Steps = [new Step { Run = "第一行\n第二行\n第三行" }],
+                },
+            },
+        };
+
+        string yaml = WorkflowWriter.Write(workflow);
+
+        // 块标量：换行原样留着；折叠标量会把三行折成一行，那就改了脚本语义
+        Assert.Contains("run: |-", yaml, StringComparison.Ordinal);
+        Assert.DoesNotContain(">-", yaml, StringComparison.Ordinal);
+        Assert.Contains("第一行\n", yaml, StringComparison.Ordinal);
+        Assert.Contains("第二行\n", yaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void 空触发器与空作业会被校验挑出来()
     {
         IReadOnlyList<string> problems = WorkflowValidator.Check(new WorkflowDocument());
