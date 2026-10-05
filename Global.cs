@@ -246,7 +246,10 @@ internal static class WorkspaceGuard
 internal static class ToolScope
 {
     /// <summary>参数名里出现这些词就当成"可能是路径"。</summary>
-    private static readonly string[] PathLikeWords = ["path", "file", "dir", "folder", "slnx", "csproj"];
+    private static readonly string[] PathLikeWords = ["path", "file", "dir", "folder", "slnx", "csproj", "target"];
+
+    /// <summary>FTP 会话句柄的前缀：这种值指向远端，不做本地边界检查。</summary>
+    private const string SessionPrefix = "ftp:";
 
     /// <summary>检查这次调用；返回 null = 放行，否则是给调用方看的拒绝话术。</summary>
     public static string? Refuse(RequestContext<CallToolRequestParams> context)
@@ -256,6 +259,12 @@ internal static class ToolScope
         {
             return null;
         }
+
+        // `target` / `toTarget` 指的是**别的存储/容器**（FTP 会话、压缩包、正在被追踪的压缩包）。
+        // 只要它不是空的，配套的 `path` / `toPath` 就是**那个容器里的路径**，不是本地文件系统上的路径 ——
+        // 本地边界管不着它。只有 target 为空（本地）时，path 才是本地路径。
+        bool insideSomething = Text(arguments, "target").Length > 0;
+        bool insideSomethingElse = Text(arguments, "toTarget").Length > 0;
 
         foreach (KeyValuePair<string, JsonElement> pair in arguments)
         {
@@ -270,9 +279,20 @@ internal static class ToolScope
             }
 
             string text = (pair.Value.GetString() ?? "").Trim();
+            if (IsSession(text))
+            {
+                continue;   // 会话句柄本身不是本地路径
+            }
+
             if (!LooksLikePath(text))
             {
                 continue;
+            }
+
+            if ((insideSomething && pair.Key.Equals("path", StringComparison.OrdinalIgnoreCase))
+                || (insideSomethingElse && pair.Key.Equals("toPath", StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;   // 容器内的路径（包内 / 远端），本地边界管不着
             }
 
             if (!WorkspaceGuard.IsInside(text, out _, out string message))
@@ -282,6 +302,27 @@ internal static class ToolScope
         }
 
         return null;
+    }
+
+    /// <summary>取某个参数的文字值；没给、或不是字符串，就返回空串。</summary>
+    private static string Text(IDictionary<string, JsonElement> arguments, string name)
+    {
+        foreach (KeyValuePair<string, JsonElement> pair in arguments)
+        {
+            if (pair.Key.Equals(name, StringComparison.OrdinalIgnoreCase)
+                && pair.Value.ValueKind == JsonValueKind.String)
+            {
+                return (pair.Value.GetString() ?? "").Trim();
+            }
+        }
+
+        return "";
+    }
+
+    /// <summary>这个值是不是 FTP 会话句柄。</summary>
+    private static bool IsSession(string text)
+    {
+        return text.StartsWith(SessionPrefix, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>值看起来像不像文件系统路径：有分隔符，或者有盘符。</summary>

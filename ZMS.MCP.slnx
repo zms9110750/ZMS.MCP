@@ -2,9 +2,11 @@
   <Folder Name="/src/">
     <Project Path="src/ZMS.MCP.Cli/ZMS.MCP.Cli.csproj" />
     <Project Path="src/ZMS.MCP.Csharp/ZMS.MCP.Csharp.csproj" />
+    <Project Path="src/ZMS.MCP.Resource/ZMS.MCP.Resource.csproj" />
     <Project Path="src/ZMS.MCP.Structured/ZMS.MCP.Structured.csproj" />
   </Folder>
   <Folder Name="/test/">
+    <Project Path="test/ZMS.MCP.Resource.Test/ZMS.MCP.Resource.Test.csproj" />
     <Project Path="test/ZMS.MCP.Structured.Test/ZMS.MCP.Structured.Test.csproj" />
     <Project Path="test/ZMS.MCP.Test/ZMS.MCP.Test.csproj" />
     <Project Path="test/ZMS.MCP.Csharp.Test/ZMS.MCP.Csharp.Test.csproj" />
