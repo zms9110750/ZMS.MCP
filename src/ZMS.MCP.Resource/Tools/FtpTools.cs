@@ -15,23 +15,20 @@ public static class FtpTools
         "kept in memory only: never written to disk, never logged, and never shown in listings (they show the account " +
         "and host). There is a limit on how many sessions can be open at once, and idle sessions close themselves. " +
         "Note that an archive on FTP cannot be tracked.")]
-    public static Task<string> Login(
+    public static async Task<string> Login(
         [Description("Host name or address, e.g. 'ftp.example.com'.")] string host,
         [Description("Port. Default 21.")] int port = FtpSessions.DefaultPort,
         [Description("User name. Empty = anonymous.")] string? user = null,
         [Description("Password. Empty = anonymous. Kept in memory only.")] string? password = null)
     {
-        return ToolGuard.RunAsync(async () =>
-        {
-            string handle = await FtpSessions.LoginAsync(host, port, user, password).ConfigureAwait(false);
+        string handle = await FtpSessions.LoginAsync(host, port, user, password).ConfigureAwait(false);
 
-            StringBuilder builder = new();
-            builder.AppendLine("# 已登录");
-            builder.AppendLine($"- `{FtpSessions.Prefix}{handle}`");
-            builder.AppendLine($"- 现在开着 {FtpSessions.Count} 个会话（上限 {FtpSessions.Max}）");
-            builder.AppendLine("- 把这个句柄填进 `target`，例如 `target = 'ftp:" + handle + "'`。");
-            return builder.ToString();
-        });
+        StringBuilder builder = new();
+        builder.AppendLine("# 已登录");
+        builder.AppendLine($"- `{FtpSessions.Prefix}{handle}`");
+        builder.AppendLine($"- 现在开着 {FtpSessions.Count} 个会话（上限 {FtpSessions.Max}）");
+        builder.AppendLine("- 把这个句柄填进 `target`，例如 `target = 'ftp:" + handle + "'`。");
+        return builder.ToString();
     }
 
     [McpServerTool(ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = true)]
@@ -41,7 +38,7 @@ public static class FtpTools
     public static Task<string> Logout(
         [Description("Session handle, e.g. 'ftp:s1a2b3c4d'. Empty = close every session.")] string? session = null)
     {
-        return ToolGuard.RunAsync(() => FtpSessions.LogoutAsync(session));
+        return FtpSessions.LogoutAsync(session);
     }
 
     /// <summary>给别的工具用：按会话句柄要一条打开的连接。</summary>

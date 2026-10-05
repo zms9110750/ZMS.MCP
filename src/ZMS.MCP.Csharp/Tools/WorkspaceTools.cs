@@ -21,23 +21,20 @@ public static class WorkspaceTools
     public static string ViewProjectOrSolution(
         [Description("csproj path (or a unique project name), or a .slnx file")] string path)
     {
-        return ToolGuard.Run(() =>
+        string trimmed = (path ?? "").Trim();
+        string full = Path.GetFullPath(trimmed);
+        if (File.Exists(full) && full.EndsWith(".slnx", PathComparison.Comparison))
         {
-            string trimmed = (path ?? "").Trim();
-            string full = Path.GetFullPath(trimmed);
-            if (File.Exists(full) && full.EndsWith(".slnx", PathComparison.Comparison))
-            {
-                return SolutionViewer.ViewTree(full);
-            }
+            return SolutionViewer.ViewTree(full);
+        }
 
-            if (File.Exists(full) && full.EndsWith(".sln", PathComparison.Comparison))
-            {
-                throw new InvalidOperationException(
-                    $"只能查看 .slnx：{Path.GetFileName(full)}。请先用「迁移解决方案为 slnx」把它迁过来。");
-            }
+        if (File.Exists(full) && full.EndsWith(".sln", PathComparison.Comparison))
+        {
+            throw new InvalidOperationException(
+                $"只能查看 .slnx：{Path.GetFileName(full)}。请先用「迁移解决方案为 slnx」把它迁过来。");
+        }
 
-            return ProjectViewer.View(trimmed);
-        });
+        return ProjectViewer.View(trimmed);
     }
 
     [McpServerTool(ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]
@@ -48,7 +45,7 @@ public static class WorkspaceTools
         [Description("Path to the .sln file (or to a folder containing it)")] string path,
         [Description("Overwrite an existing .slnx (passes --force)")] bool force = false)
     {
-        return ToolGuard.Run(() => SolutionViewer.MigrateToSlnx(path, force));
+        return SolutionViewer.MigrateToSlnx(path, force);
     }
 
     [McpServerTool(ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]
@@ -63,7 +60,7 @@ public static class WorkspaceTools
         [Description("Complete new csproj content; empty = just read and return the cookie")] string content = "",
         [Description("Cookie from the read step; the write is refused if the file changed since")] string cookie = "")
     {
-        return ToolGuard.Run(() => ProjectEditor.EditMetadata(csprojPath, content, cookie));
+        return ProjectEditor.EditMetadata(csprojPath, content, cookie);
     }
 
     [McpServerTool(ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
@@ -74,39 +71,36 @@ public static class WorkspaceTools
     public static string ListProjectPackages(
         [Description("csproj path, or a unique project name")] string csprojPath)
     {
-        return ToolGuard.Run(() =>
+        PackageGraphResult graph = PackageGraph.Build(csprojPath);
+        System.Text.StringBuilder builder = new();
+        builder.AppendLine("# 包引用");
+        builder.AppendLine($"- 项目：{graph.ProjectPath}");
+        if (graph.AssetsMissing)
         {
-            PackageGraphResult graph = PackageGraph.Build(csprojPath);
-            System.Text.StringBuilder builder = new();
-            builder.AppendLine("# 包引用");
-            builder.AppendLine($"- 项目：{graph.ProjectPath}");
-            if (graph.AssetsMissing)
+            // 没有还原产物时只说这一句：再打"可能已过期"是同一件事说两遍
+            string assets = graph.AssetsPath.Length == 0 ? "（MSBuild 没给出 ProjectAssetsFile）" : graph.AssetsPath;
+            builder.AppendLine($"- 依赖图来源：ReferencePath（还原产物缺失，可能不全）{assets}");
+        }
+        else
+        {
+            builder.AppendLine("- 依赖图来源：真实还原结果");
+            builder.AppendLine($"- assets：{graph.AssetsPath}");
+            if (graph.MayBeStale)
             {
-                // 没有还原产物时只说这一句：再打"可能已过期"是同一件事说两遍
-                string assets = graph.AssetsPath.Length == 0 ? "（MSBuild 没给出 ProjectAssetsFile）" : graph.AssetsPath;
-                builder.AppendLine($"- 依赖图来源：ReferencePath（还原产物缺失，可能不全）{assets}");
+                builder.AppendLine("- ⚠ 依赖图可能已过期（csproj / props 比还原产物新）");
             }
-            else
-            {
-                builder.AppendLine("- 依赖图来源：真实还原结果");
-                builder.AppendLine($"- assets：{graph.AssetsPath}");
-                if (graph.MayBeStale)
-                {
-                    builder.AppendLine("- ⚠ 依赖图可能已过期（csproj / props 比还原产物新）");
-                }
-            }
+        }
 
-            builder.AppendLine();
-            builder.AppendLine("## 顶级包（直接引用）");
-            AppendNodes(builder, graph.Direct);
-            builder.AppendLine();
-            builder.AppendLine("## 依赖传递包");
-            AppendNodes(builder, graph.Transitive);
-            builder.AppendLine();
-            builder.AppendLine("## 项目引用而传递的顶级包");
-            AppendNodes(builder, graph.FromProjectReferences);
-            return builder.ToString();
-        });
+        builder.AppendLine();
+        builder.AppendLine("## 顶级包（直接引用）");
+        AppendNodes(builder, graph.Direct);
+        builder.AppendLine();
+        builder.AppendLine("## 依赖传递包");
+        AppendNodes(builder, graph.Transitive);
+        builder.AppendLine();
+        builder.AppendLine("## 项目引用而传递的顶级包");
+        AppendNodes(builder, graph.FromProjectReferences);
+        return builder.ToString();
     }
 
     [McpServerTool(ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = true)]
@@ -122,7 +116,7 @@ public static class WorkspaceTools
         [Description("Packages to install: each item is 'nugetName' or 'nugetName@version', e.g. [\"Newtonsoft.Json@13.0.3\", \"Polly\"]")] string[] nugetPack,
         [Description("Also allow prerelease versions")] bool allowPrerelease = false)
     {
-        return ToolGuard.Run(() => PackageManager.Install(csprojPath, ParseRequests(nugetPack), allowPrerelease));
+        return PackageManager.Install(csprojPath, ParseRequests(nugetPack), allowPrerelease);
     }
 
     [McpServerTool(ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]
@@ -135,7 +129,7 @@ public static class WorkspaceTools
         [Description("csproj path, or a unique project name")] string csprojPath,
         [Description("Package ids to remove")] string[] nugetName)
     {
-        return ToolGuard.Run(() => PackageManager.Remove(csprojPath, nugetName));
+        return PackageManager.Remove(csprojPath, nugetName);
     }
 
     internal static List<PackageRequest> ParseRequests(IEnumerable<string> nugetPack)

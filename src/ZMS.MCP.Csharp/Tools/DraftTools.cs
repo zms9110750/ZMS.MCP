@@ -24,9 +24,9 @@ public static class DraftTools
         [Description("csproj path, or a unique project name")] string csprojPath,
         [Description("The tracking cookie from a previous call; empty = start or resume tracking")] string cookie = "")
     {
-        return ToolGuard.Run(() => string.IsNullOrWhiteSpace(cookie)
+        return string.IsNullOrWhiteSpace(cookie)
             ? TrackingService.Track(csprojPath)
-            : TrackingService.Untrack(csprojPath, cookie));
+            : TrackingService.Untrack(csprojPath, cookie);
     }
 
     [McpServerTool(ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
@@ -43,7 +43,7 @@ public static class DraftTools
         [Description("Member name (with parameter list for methods); empty stages a brand new type")] string memberName,
         [Description("New member source; null deletes the member")] string? content)
     {
-        return ToolGuard.Run(() => DraftService.Stage(cookie, typePath, memberName, content));
+        return DraftService.Stage(cookie, typePath, memberName, content);
     }
 
     [McpServerTool(ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
@@ -60,7 +60,7 @@ public static class DraftTools
         [Description("Symbol path, e.g. 'My.Ns.Type.Member(int)' or 'My.Ns.Type'")] string memberPath,
         [Description("New name, without a parameter list")] string newName)
     {
-        return ToolGuard.Run(() => DraftService.Rename(cookie, memberPath, newName));
+        return DraftService.Rename(cookie, memberPath, newName);
     }
 
     [McpServerTool(ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
@@ -70,7 +70,7 @@ public static class DraftTools
     public static string ListDraft(
         [Description("csproj path, or a unique project name")] string csprojPath)
     {
-        return ToolGuard.Run(() => DraftService.List(csprojPath));
+        return DraftService.List(csprojPath);
     }
 
     [McpServerTool(ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]
@@ -84,7 +84,7 @@ public static class DraftTools
         [Description("Tracking cookie from track_project")] string cookie,
         [Description("applyCookie from the pre-check; empty = pre-check only")] string applyCookie)
     {
-        return ToolGuard.Run(() => DraftService.Confirm(cookie, applyCookie));
+        return DraftService.Confirm(cookie, applyCookie);
     }
 
     [McpServerTool(ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]
@@ -98,6 +98,6 @@ public static class DraftTools
         [Description("The selectCookie returned by the symbol tool")] string selectCookie,
         [Description("keep (keep the draft) / drop (remove the draft)")] string choice)
     {
-        return ToolGuard.Run(() => DraftService.Select(csprojPath, memberPath, selectCookie, choice));
+        return DraftService.Select(csprojPath, memberPath, selectCookie, choice);
     }
 }

@@ -32,14 +32,7 @@ public static partial class StructuredTools
         [Description("Explicit format (json/xml/yaml/toml/ini); empty = infer from the extension")] string format = "",
         [Description("Explicit encoding name (utf-8 / utf-16 / gb18030 ...); empty = detect")] string encoding = "")
     {
-        try
-        {
-            return Read(path, point, depth, length, format, encoding);
-        }
-        catch (Exception exception)
-        {
-            return McpStdioServer.FailurePrefix + exception.Message;
-        }
+        return Read(path, point, depth, length, format, encoding);
     }
 
     [McpServerTool(ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]
@@ -63,14 +56,7 @@ public static partial class StructuredTools
         [Description("Allow rewriting when the point matches")] bool update = false,
         [Description("Allow acting on every match instead of refusing when several match")] bool multi = false)
     {
-        try
-        {
-            return Edit(cookie, path, point, value, format, encoding, insert, remove, update, multi);
-        }
-        catch (Exception exception)
-        {
-            return McpStdioServer.FailurePrefix + exception.Message;
-        }
+        return Edit(cookie, path, point, value, format, encoding, insert, remove, update, multi);
     }
 
     private static string Read(string path, string point, int depth, int length, string format, string encoding)

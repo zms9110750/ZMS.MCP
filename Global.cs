@@ -64,9 +64,24 @@ internal static class McpStdioServer
                         };
                     }
 
-                    CallToolResult result = await next(context, cancellationToken);
+                    CallToolResult result;
+                    try
+                    {
+                        result = await next(context, cancellationToken);
+                    }
+                    catch (Exception exception)
+                    {
+                        // 工具抛出来的异常在这里收口：调用方看到的永远是 "Error: ..." + isError=true，
+                        // 而不是一条裸异常（裸异常会让 MCP 只回一句 “An error occurred invoking 'x'.”）。
+                        // 有了这道口，工具方法里就不必再自己 try/catch 包一层了。
+                        return new CallToolResult
+                        {
+                            Content = [new TextContentBlock { Text = FailurePrefix + exception.Message }],
+                            IsError = true,
+                        };
+                    }
 
-                    // 工具把失败写成 "Error: ..." 文本（ToolGuard 的约定），回来时把它翻成协议层的信号：
+                    // 工具把失败写成 "Error: ..." 文本（那是个约定），回来时把它翻成协议层的信号：
                     // 否则调用方只能靠读文本猜"到底成没成"，而 isError 一直说"成功"。
                     if (result.IsError != true && Failed(result))
                     {

@@ -19,7 +19,7 @@ public static class ReadTools
         "The whole thing is delivered only when it fits in the per-call limit; otherwise the reply is truncated and " +
         "says how much was left out and how long the whole thing is - and no cookie is minted, so that object cannot be " +
         "written or deleted. Decoding is strict: it refuses rather than silently replacing undecodable bytes.")]
-    public static Task<string> Read(
+    public static async Task<string> Read(
         [Description("Path of the object. Absolute (may include a drive letter) unless target is given.")] string path,
         [Description("Storage target: empty = local file system; 'ftp:<session>' = FTP session; anything else is an archive path.")] string? target = null,
         [Description("Skip this many lines first (applied before offset). 0 = from the first line.")] int skipline = 0,
@@ -29,47 +29,44 @@ public static class ReadTools
         [Description("Encoding name, e.g. 'gbk' or 'utf-8'. Empty = BOM, then strict UTF-8, else refuse.")] string? encoding = null,
         [Description("Regular expression searched in the content. Context is graded by match count: over 20 matches give line numbers only, over 5 give one line around each, 5 or fewer give three.")] string? regex = null)
     {
-        return ToolGuard.RunAsync(async () =>
+        Address address = Resolve.Address(target, path);
+
+        if (address is LocalAddress local)
         {
-            Address address = Resolve.Address(target, path);
+            return ReadService.Run(local, skipline, offset, length, takeline, encoding, regex);
+        }
 
-            if (address is LocalAddress local)
-            {
-                return ReadService.Run(local, skipline, offset, length, takeline, encoding, regex);
-            }
+        if (address is SessionAddress session)
+        {
+            return await RemoteService.ReadAsync(session, skipline, offset, length, takeline, encoding, regex)
+                .ConfigureAwait(false);
+        }
 
-            if (address is SessionAddress session)
-            {
-                return await RemoteService.ReadAsync(session, skipline, offset, length, takeline, encoding, regex)
-                    .ConfigureAwait(false);
-            }
+        // 压缩包：**永远直读磁盘上现在那个包**，跟有没有在追踪无关
+        if (address is ArchiveAddress archive)
+        {
+            ArchiveService.ArchiveItem? item = ArchiveService.ListEntries(archive.ArchivePath)
+                .FirstOrDefault(candidate => string.Equals(
+                    candidate.Path,
+                    archive.InnerPath.Replace('\\', '/').Trim('/'),
+                    StringComparison.OrdinalIgnoreCase))
+                ?? throw new ArgumentException($"包里没有这个条目：{archive.InnerPath}");
 
-            // 压缩包：**永远直读磁盘上现在那个包**，跟有没有在追踪无关
-            if (address is ArchiveAddress archive)
-            {
-                ArchiveService.ArchiveItem? item = ArchiveService.ListEntries(archive.ArchivePath)
-                    .FirstOrDefault(candidate => string.Equals(
-                        candidate.Path,
-                        archive.InnerPath.Replace('\\', '/').Trim('/'),
-                        StringComparison.OrdinalIgnoreCase))
-                    ?? throw new ArgumentException($"包里没有这个条目：{archive.InnerPath}");
+            byte[]? body = ArchiveService.ReadEntry(archive.ArchivePath, archive.InnerPath)
+                ?? throw new ArgumentException($"包里读不出这个条目：{archive.InnerPath}");
 
-                byte[]? body = ArchiveService.ReadEntry(archive.ArchivePath, archive.InnerPath)
-                    ?? throw new ArgumentException($"包里读不出这个条目：{archive.InnerPath}");
+            return ReadService.Render(
+                $"{archive.ArchivePath}!{archive.InnerPath}",
+                body,
+                item.Modified,
+                skipline,
+                offset,
+                length,
+                takeline,
+                encoding,
+                regex);
+        }
 
-                return ReadService.Render(
-                    $"{archive.ArchivePath}!{archive.InnerPath}",
-                    body,
-                    item.Modified,
-                    skipline,
-                    offset,
-                    length,
-                    takeline,
-                    encoding,
-                    regex);
-            }
-
-            throw new ArgumentException("压缩包还没接上。");
-        });
+        throw new ArgumentException("压缩包还没接上。");
     }
 }

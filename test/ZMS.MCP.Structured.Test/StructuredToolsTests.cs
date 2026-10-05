@@ -186,7 +186,7 @@ public sealed class StructuredToolsTests
 
         Apply(file, "$.a", "2", update: true);
 
-        Assert.Contains("重新 read_structured", Apply(stale, file, "$.a", "3", update: true), StringComparison.Ordinal);
+        Assert.Contains("重新 read_structured", Assert.ThrowsAny<Exception>(() => Apply(stale, file, "$.a", "3", update: true)).Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -205,7 +205,7 @@ public sealed class StructuredToolsTests
     {
         string file = Sample("multi.json", """{"a": {"v": 1}, "b": {"v": 2}}""");
 
-        Assert.Contains("multi 没开", Apply(file, "$..v", "9", update: true), StringComparison.Ordinal);
+        Assert.Contains("multi 没开", Assert.ThrowsAny<Exception>(() => Apply(file, "$..v", "9", update: true)).Message, StringComparison.Ordinal);
         Assert.Contains("（2 处）", Apply(file, "$..v", "9", update: true, multi: true), StringComparison.Ordinal);
 
         string text = File.ReadAllText(file);
@@ -218,7 +218,7 @@ public sealed class StructuredToolsTests
     {
         string file = Sample("missing.json", """{"a": 1}""");
 
-        Assert.Contains("要先定位父容器", Apply(file, "$.nope.extra", "1", insert: true), StringComparison.Ordinal);
+        Assert.Contains("要先定位父容器", Assert.ThrowsAny<Exception>(() => Apply(file, "$.nope.extra", "1", insert: true)).Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -226,7 +226,7 @@ public sealed class StructuredToolsTests
     {
         string file = Sample("config.conf", """{"a": 1}""");
 
-        Assert.Contains("看不懂扩展名", StructuredTools.ReadStructured(file), StringComparison.Ordinal);
+        Assert.Contains("看不懂扩展名", Assert.ThrowsAny<Exception>(() => StructuredTools.ReadStructured(file)).Message, StringComparison.Ordinal);
         Assert.Contains("cookie：`", StructuredTools.ReadStructured(file, format: "json"), StringComparison.Ordinal);
     }
 
@@ -244,7 +244,7 @@ public sealed class StructuredToolsTests
     {
         string file = Write("gbk.ini", "gb18030", "[名称]\r\n键=中文值\r\n");
 
-        Assert.Contains("不是 UTF-8", StructuredTools.ReadStructured(file), StringComparison.Ordinal);
+        Assert.Contains("不是 UTF-8", Assert.ThrowsAny<Exception>(() => StructuredTools.ReadStructured(file)).Message, StringComparison.Ordinal);
         Assert.Equal(0, CookieOrNothing(file).Length);
     }
 
@@ -309,7 +309,7 @@ public sealed class StructuredToolsTests
     {
         string file = Sample("anchor.yaml", "base: &b\n  x: 1\nchild:\n  <<: *b\n");
 
-        Assert.Contains("锚点", StructuredTools.ReadStructured(file), StringComparison.Ordinal);
+        Assert.Contains("锚点", Assert.ThrowsAny<Exception>(() => StructuredTools.ReadStructured(file)).Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -319,7 +319,7 @@ public sealed class StructuredToolsTests
             "declared.xml",
             "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<!-- 顶部 -->\n<config>\n  <!-- 里面 -->\n  <a>1</a>\n</config>\n");
 
-        Apply(file, "/config/a", "2", update: true);
+        Apply(file, "/config/a", "<a>2</a>", update: true);
 
         string text = File.ReadAllText(file);
         Assert.StartsWith("<?xml version=\"1.0\" encoding=\"utf-8\"?>", text, StringComparison.Ordinal);
@@ -371,9 +371,16 @@ public sealed class StructuredToolsTests
 
     private static string CookieOrNothing(string file)
     {
-        Match match = Regex.Match(StructuredTools.ReadStructured(file, length: 300), "cookie：`([0-9a-f]+)`");
-
-        return match.Success ? match.Groups[1].Value : "";
+        try
+        {
+            Match match = Regex.Match(StructuredTools.ReadStructured(file, length: 300), "cookie：`([0-9a-f]+)`");
+            return match.Success ? match.Groups[1].Value : "";
+        }
+        catch (Exception)
+        {
+            // 读不出来（比如编码解不开）就是"没有 cookie"，正是本方法要表达的
+            return "";
+        }
     }
 
     private static string Sample(string name, string body)

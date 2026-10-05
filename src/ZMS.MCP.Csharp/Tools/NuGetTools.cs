@@ -25,60 +25,57 @@ public static class NuGetTools
         [Description("Search the local NuGet cache")] bool local = true,
         [Description("Search nuget.org")] bool web = false)
     {
-        return ToolGuard.Run(() =>
+        if (!local && !web)
         {
-            if (!local && !web)
-            {
-                throw new InvalidOperationException("local 与 web 至少要开一个（两个都关就没有可查的来源）。");
-            }
+            throw new InvalidOperationException("local 与 web 至少要开一个（两个都关就没有可查的来源）。");
+        }
 
-            // 只在开了 local 时才读本地缓存（Description 说 local = search the local cache）
-            HashSet<string> localNames = local
-                ? new HashSet<string>(NuGetCache.SearchPackages(packName), StringComparer.OrdinalIgnoreCase)
-                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            List<string> names = [];
+        // 只在开了 local 时才读本地缓存（Description 说 local = search the local cache）
+        HashSet<string> localNames = local
+            ? new HashSet<string>(NuGetCache.SearchPackages(packName), StringComparer.OrdinalIgnoreCase)
+            : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        List<string> names = [];
+        if (local)
+        {
+            names.AddRange(localNames);
+        }
+
+        StringBuilder builder = new();
+        if (web)
+        {
+            IReadOnlyList<(string Id, string Version)> online = NuGetOnline.SearchPackages(packName, page);
+            List<string> onlineNames = [.. online.Select(item => item.Id)];
             if (local)
             {
-                names.AddRange(localNames);
-            }
-
-            StringBuilder builder = new();
-            if (web)
-            {
-                IReadOnlyList<(string Id, string Version)> online = NuGetOnline.SearchPackages(packName, page);
-                List<string> onlineNames = [.. online.Select(item => item.Id)];
-                if (local)
-                {
-                    builder.AppendLine($"本页查询到 {onlineNames.Count} 个，[] 标记为本地也存在");
-                    builder.AppendLine();
-                    foreach (string name in onlineNames)
-                    {
-                        builder.AppendLine(localNames.Contains(name) ? $"[{name}]" : name);
-                    }
-
-                    return builder.ToString();
-                }
-
-                builder.AppendLine($"# 线上查询到 {onlineNames.Count} 个（第 {page + 1} 页，每页 {PageSize} 条）");
+                builder.AppendLine($"本页查询到 {onlineNames.Count} 个，[] 标记为本地也存在");
                 builder.AppendLine();
-                foreach ((string id, string version) in online)
+                foreach (string name in onlineNames)
                 {
-                    builder.AppendLine(version.Length == 0 ? id : $"{id} {version}");
+                    builder.AppendLine(localNames.Contains(name) ? $"[{name}]" : name);
                 }
 
                 return builder.ToString();
             }
 
-            names.Sort(StringComparer.OrdinalIgnoreCase);
-            builder.AppendLine($"# 本地查询到 {names.Count} 个");
+            builder.AppendLine($"# 线上查询到 {onlineNames.Count} 个（第 {page + 1} 页，每页 {PageSize} 条）");
             builder.AppendLine();
-            foreach (string name in names)
+            foreach ((string id, string version) in online)
             {
-                builder.AppendLine(name);
+                builder.AppendLine(version.Length == 0 ? id : $"{id} {version}");
             }
 
             return builder.ToString();
-        });
+        }
+
+        names.Sort(StringComparer.OrdinalIgnoreCase);
+        builder.AppendLine($"# 本地查询到 {names.Count} 个");
+        builder.AppendLine();
+        foreach (string name in names)
+        {
+            builder.AppendLine(name);
+        }
+
+        return builder.ToString();
     }
 
     [McpServerTool(ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = true)]
@@ -94,76 +91,73 @@ public static class NuGetTools
         [Description("Query the local NuGet cache")] bool local = true,
         [Description("Query nuget.org")] bool web = false)
     {
-        return ToolGuard.Run(() =>
+        VersionRangeFilter filter;
+        try
         {
-            VersionRangeFilter filter;
+            filter = VersionRangeFilter.Parse(verRange);
+        }
+        catch (ArgumentException exception)
+        {
+            throw new InvalidOperationException($"Bad version range: {exception.Message}");
+        }
+
+        if (!local && !web)
+        {
+            throw new InvalidOperationException("local 与 web 至少要开一个（两个都关就没有可查的来源）。");
+        }
+
+        // 只在开了 local 时才读本地缓存（Description 说 local = local cache）
+        List<ComparableVersion> localVersions = local ? [.. NuGetCache.Versions(packName)] : [];
+        List<ComparableVersion> versions = [.. localVersions];
+        string source = "本地缓存";
+        if (web)
+        {
             try
             {
-                filter = VersionRangeFilter.Parse(verRange);
+                versions = [.. NuGetOnline.Versions(packName)];
+                source = local ? "本地缓存 + nuget.org" : "nuget.org";
             }
-            catch (ArgumentException exception)
+            catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
             {
-                throw new InvalidOperationException($"Bad version range: {exception.Message}");
+                source = $"本地缓存（线上取失败：{exception.Message}）";
             }
+        }
 
-            if (!local && !web)
+        // 范围里符合的**全部**版本；预览版是否列出由 filter 决定
+        List<ComparableVersion> inRange = [.. versions.Where(filter.MatchesRange)];
+        List<ComparableVersion> shown = filter.IncludePrerelease
+            ? inRange
+            : [.. inRange.Where(version => !version.IsPrerelease)];
+        shown.Sort();
+        shown.Reverse();
+
+        StringBuilder builder = new();
+        builder.AppendLine($"# {packName}（{source}）");
+        builder.AppendLine($"> 范围 {filter.Description}：共列出 {shown.Count} 个版本");
+        if (!filter.IncludePrerelease)
+        {
+            // 挡掉的预览版要说出来，否则"少了几个"看起来像工具算错了
+            int leftOut = inRange.Count - shown.Count;
+            if (leftOut > 0)
             {
-                throw new InvalidOperationException("local 与 web 至少要开一个（两个都关就没有可查的来源）。");
+                builder.AppendLine($"（另有 {leftOut} 个预览版落在范围内，未列出；verRange 用 `*-*` 才会列出）");
             }
+        }
 
-            // 只在开了 local 时才读本地缓存（Description 说 local = local cache）
-            List<ComparableVersion> localVersions = local ? [.. NuGetCache.Versions(packName)] : [];
-            List<ComparableVersion> versions = [.. localVersions];
-            string source = "本地缓存";
-            if (web)
-            {
-                try
-                {
-                    versions = [.. NuGetOnline.Versions(packName)];
-                    source = local ? "本地缓存 + nuget.org" : "nuget.org";
-                }
-                catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
-                {
-                    source = $"本地缓存（线上取失败：{exception.Message}）";
-                }
-            }
+        builder.AppendLine();
+        foreach (ComparableVersion version in shown)
+        {
+            bool existsLocally = localVersions.Any(localVersion => localVersion.Equals(version));
+            builder.AppendLine(local && web && existsLocally ? $"[{version}]" : version.Original);
+        }
 
-            // 范围里符合的**全部**版本；预览版是否列出由 filter 决定
-            List<ComparableVersion> inRange = [.. versions.Where(filter.MatchesRange)];
-            List<ComparableVersion> shown = filter.IncludePrerelease
-                ? inRange
-                : [.. inRange.Where(version => !version.IsPrerelease)];
-            shown.Sort();
-            shown.Reverse();
-
-            StringBuilder builder = new();
-            builder.AppendLine($"# {packName}（{source}）");
-            builder.AppendLine($"> 范围 {filter.Description}：共列出 {shown.Count} 个版本");
-            if (!filter.IncludePrerelease)
-            {
-                // 挡掉的预览版要说出来，否则"少了几个"看起来像工具算错了
-                int leftOut = inRange.Count - shown.Count;
-                if (leftOut > 0)
-                {
-                    builder.AppendLine($"（另有 {leftOut} 个预览版落在范围内，未列出；verRange 用 `*-*` 才会列出）");
-                }
-            }
-
+        if (local && web)
+        {
             builder.AppendLine();
-            foreach (ComparableVersion version in shown)
-            {
-                bool existsLocally = localVersions.Any(localVersion => localVersion.Equals(version));
-                builder.AppendLine(local && web && existsLocally ? $"[{version}]" : version.Original);
-            }
+            builder.AppendLine("（[] = 本地缓存里也存在）");
+        }
 
-            if (local && web)
-            {
-                builder.AppendLine();
-                builder.AppendLine("（[] = 本地缓存里也存在）");
-            }
-
-            return builder.ToString();
-        });
+        return builder.ToString();
     }
 
     [McpServerTool(ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = true)]
@@ -174,59 +168,56 @@ public static class NuGetTools
         [Description("Exact package id")] string packName,
         [Description("Version; empty = highest cached (or latest online)")] string ver = "")
     {
-        return ToolGuard.Run(() =>
+        string version = ver.Trim();
+        if (version.Length == 0)
         {
-            string version = ver.Trim();
-            if (version.Length == 0)
-            {
-                IReadOnlyList<ComparableVersion> cached = NuGetCache.Versions(packName);
-                version = cached.Count > 0 ? cached[0].Original : "";
-            }
+            IReadOnlyList<ComparableVersion> cached = NuGetCache.Versions(packName);
+            version = cached.Count > 0 ? cached[0].Original : "";
+        }
 
-            PackageMetadata? local = version.Length == 0 ? null : NuGetCache.ReadMetadata(packName, version);
-            if (local != null)
-            {
-                return Render(packName, version, "本地缓存", local.NuspecXml, local.Readme ?? NuGetCache.ReadReadmeFromPackage(packName, version), local.ProjectUrl, local.RepositoryUrl);
-            }
+        PackageMetadata? local = version.Length == 0 ? null : NuGetCache.ReadMetadata(packName, version);
+        if (local != null)
+        {
+            return Render(packName, version, "本地缓存", local.NuspecXml, local.Readme ?? NuGetCache.ReadReadmeFromPackage(packName, version), local.ProjectUrl, local.RepositoryUrl);
+        }
 
-            string? onlineNuspec = null;
-            string? onlineFailure = null;
-            string? readmeName = null;
+        string? onlineNuspec = null;
+        string? onlineFailure = null;
+        string? readmeName = null;
+        try
+        {
+            onlineNuspec = NuGetOnline.FetchNuspec(packName, version);
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or TimeoutException)
+        {
+            // 网络/超时失败**不能**当成"包不存在"：记下原因，最后区分开来报给调用方。
+            onlineFailure = exception.Message;
+        }
+
+        if (onlineNuspec != null)
+        {
+            (string? project, string? repository, string? readme) = ReadNuspecHints(onlineNuspec);
+            readmeName = readme;
+            string? onlineReadme = null;
             try
             {
-                onlineNuspec = NuGetOnline.FetchNuspec(packName, version);
+                onlineReadme = NuGetOnline.FetchReadme(packName, version, readmeName);
             }
             catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or TimeoutException)
             {
-                // 网络/超时失败**不能**当成"包不存在"：记下原因，最后区分开来报给调用方。
-                onlineFailure = exception.Message;
+                // readme 拿不到不影响主结果（nuspec 已经有了），这里只当作"没有 readme"
+                onlineReadme = null;
             }
 
-            if (onlineNuspec != null)
-            {
-                (string? project, string? repository, string? readme) = ReadNuspecHints(onlineNuspec);
-                readmeName = readme;
-                string? onlineReadme = null;
-                try
-                {
-                    onlineReadme = NuGetOnline.FetchReadme(packName, version, readmeName);
-                }
-                catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or TimeoutException)
-                {
-                    // readme 拿不到不影响主结果（nuspec 已经有了），这里只当作"没有 readme"
-                    onlineReadme = null;
-                }
+            return Render(packName, version, "nuget.org", onlineNuspec, onlineReadme, project, repository);
+        }
 
-                return Render(packName, version, "nuget.org", onlineNuspec, onlineReadme, project, repository);
-            }
+        if (onlineFailure != null)
+        {
+            return $"# {packName} {version}\n本地缓存没有，线上取失败：{onlineFailure}";
+        }
 
-            if (onlineFailure != null)
-            {
-                return $"# {packName} {version}\n本地缓存没有，线上取失败：{onlineFailure}";
-            }
-
-            return $"# {packName} {version}\n未找到（本地缓存与 nuget.org 都没有）。";
-        });
+        return $"# {packName} {version}\n未找到（本地缓存与 nuget.org 都没有）。";
     }
 
     private static string Render(

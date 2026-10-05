@@ -27,19 +27,16 @@ public static class DocSymbolTools
         [Description("Parameter types for overload disambiguation, e.g. 'string,int' or '(System.Int32,System.String)'")] string argsList = "",
         [Description("Explicit kind letters (NTPFMED); empty = inferred from path precision")] string type = "")
     {
-        return ToolGuard.Run(() =>
-        {
-            DocSource source = NuGetXmlDocumentation.Locate(packName, ver, tar);
-            IReadOnlyList<DocEntry> entries = NuGetXmlDocumentation.ReadAll(source.XmlPaths);
-            IReadOnlyList<string> arguments = ParseArguments(argsList);
+        DocSource source = NuGetXmlDocumentation.Locate(packName, ver, tar);
+        IReadOnlyList<DocEntry> entries = NuGetXmlDocumentation.ReadAll(source.XmlPaths);
+        IReadOnlyList<string> arguments = ParseArguments(argsList);
 
-            bool listAllTypes = string.IsNullOrWhiteSpace(path);
-            DocQueryResult result = listAllTypes
-                ? AllTypes(entries, type.Trim())
-                : DocSymbolQuery.Query(entries, path, arguments, type.Trim());
+        bool listAllTypes = string.IsNullOrWhiteSpace(path);
+        DocQueryResult result = listAllTypes
+            ? AllTypes(entries, type.Trim())
+            : DocSymbolQuery.Query(entries, path, arguments, type.Trim());
 
-            return Render(source, result, entries.Count);
-        });
+        return Render(source, result, entries.Count);
     }
 
     /// <summary>渲染查询结果（抽出来是为了让"唯一成员给原始片段"这条分支可单测）。</summary>

@@ -18,30 +18,27 @@ public static class WriteTools
         "returned instead. Without a cookie nothing is written at all: the reply is the list of effects (size, " +
         "modification time, that the whole file would be replaced) and that is not an error. Written back in the file's " +
         "own encoding; a new file is UTF-8 without BOM.")]
-    public static Task<string> Write(
+    public static async Task<string> Write(
         [Description("Path of the file. Absolute (may include a drive letter) unless target is given.")] string path,
         [Description("The whole content to write.")] string content,
         [Description("Storage target: empty = local file system; 'ftp:<session>' = FTP session; anything else is an archive path.")] string? target = null,
         [Description("Encoding to write with. Empty = the encoding the file was read with; a new file is UTF-8 without BOM.")] string? encoding = null,
         [Description("Cookie from reading this content in full. Required when the target already holds content.")] string? cookie = null)
     {
-        return ToolGuard.RunAsync(async () =>
+        Address address = Resolve.Address(target, path);
+
+        if (address is LocalAddress local)
         {
-            Address address = Resolve.Address(target, path);
+            return WriteService.Write(local, content, encoding, cookie);
+        }
 
-            if (address is LocalAddress local)
-            {
-                return WriteService.Write(local, content, encoding, cookie);
-            }
+        // 远端：只有「目标还不存在」能做 —— 覆盖需要凭据，而远端读取不发 cookie
+        if (address is SessionAddress session)
+        {
+            return await RemoteService.WriteAsync(session, content, encoding).ConfigureAwait(false);
+        }
 
-            // 远端：只有「目标还不存在」能做 —— 覆盖需要凭据，而远端读取不发 cookie
-            if (address is SessionAddress session)
-            {
-                return await RemoteService.WriteAsync(session, content, encoding).ConfigureAwait(false);
-            }
-
-            throw new ArgumentException("压缩包内的改动不走 write：往包里放东西用 `copy`（目标填追踪 cookie），删条目用 `delete`。");
-        });
+        throw new ArgumentException("压缩包内的改动不走 write：往包里放东西用 `copy`（目标填追踪 cookie），删条目用 `delete`。");
     }
 
     [McpServerTool(ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]
@@ -60,15 +57,12 @@ public static class WriteTools
         [Description("Treat pattern as a regular expression. Default false = literal match.")] bool regex = false,
         [Description("Encoding to write with. Empty = the encoding the file was read with.")] string? encoding = null)
     {
-        return ToolGuard.Run(() =>
+        Address address = Address.Parse(target, path);
+        if (address is not LocalAddress local)
         {
-            Address address = Address.Parse(target, path);
-            if (address is not LocalAddress local)
-            {
-                throw new ArgumentException("目前只支持本地对象；FTP 与压缩包还没接上。");
-            }
+            throw new ArgumentException("目前只支持本地对象；FTP 与压缩包还没接上。");
+        }
 
-            return WriteService.Replace(local, pattern, replacement, regex, encoding, cookie);
-        });
+        return WriteService.Replace(local, pattern, replacement, regex, encoding, cookie);
     }
 }

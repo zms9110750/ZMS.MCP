@@ -24,7 +24,7 @@ public static class NetTools
         [Description("Local absolute path to download to. When given, the bytes go to disk instead of the reply.")] string? targetPath = null,
         [Description("Cookie for the existing target file, required only when targetPath already holds a file.")] string? cookie = null)
     {
-        return ToolGuard.RunAsync(() => FetchService.RunAsync(url, method, head, body, targetPath, cookie));
+        return FetchService.RunAsync(url, method, head, body, targetPath, cookie);
     }
 
     [McpServerTool(ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
@@ -38,42 +38,39 @@ public static class NetTools
         [Description("Local absolute path to write the entry to; it must not exist yet. Only meaningful together with key.")] string? path = null,
         [Description("Page number when listing. Default 0. 50 entries per page.")] int page = 0)
     {
-        return ToolGuard.Run(() =>
+        if (page < 0)
         {
-            if (page < 0)
-            {
-                throw new ArgumentException("page 不能是负数。");
-            }
+            throw new ArgumentException("page 不能是负数。");
+        }
 
-            if (string.IsNullOrWhiteSpace(key))
-            {
-                return ListPage(page);
-            }
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            return ListPage(page);
+        }
 
-            if (!string.IsNullOrWhiteSpace(path))
-            {
-                string saved = CacheStore.Save(key!.Trim(), path!);
-                return $"# 已落盘\n- 缓存：`{key.Trim()}`\n- 落点：{saved}\n"
-                    + "- 之后就能用 `read` 的范围参数去看它的其他部分。\n";
-            }
+        if (!string.IsNullOrWhiteSpace(path))
+        {
+            string saved = CacheStore.Save(key!.Trim(), path!);
+            return $"# 已落盘\n- 缓存：`{key.Trim()}`\n- 落点：{saved}\n"
+                + "- 之后就能用 `read` 的范围参数去看它的其他部分。\n";
+        }
 
-            string? content = CacheStore.Read(key!.Trim());
-            if (content == null)
-            {
-                throw new ArgumentException($"没有这条缓存：{key}（用不带 key 的调用列出来看看）。");
-            }
+        string? content = CacheStore.Read(key!.Trim());
+        if (content == null)
+        {
+            throw new ArgumentException($"没有这条缓存：{key}（用不带 key 的调用列出来看看）。");
+        }
 
-            string shown = content.Length <= CacheStore.ReadLimit ? content : content[..CacheStore.ReadLimit];
-            StringBuilder builder = new();
-            builder.AppendLine($"# 缓存 `{key.Trim()}`");
-            builder.AppendLine($"- 共 {content.Length} 字符，这里给 {(content.Length <= CacheStore.ReadLimit ? "全部" : $"前 {CacheStore.ReadLimit} 字符")}");
-            builder.AppendLine("- 要看全文：用 `key` + `path` 落盘，再 `read` 它的范围。");
-            builder.AppendLine();
-            builder.AppendLine("```");
-            builder.AppendLine(shown);
-            builder.AppendLine("```");
-            return builder.ToString();
-        });
+        string shown = content.Length <= CacheStore.ReadLimit ? content : content[..CacheStore.ReadLimit];
+        StringBuilder builder = new();
+        builder.AppendLine($"# 缓存 `{key.Trim()}`");
+        builder.AppendLine($"- 共 {content.Length} 字符，这里给 {(content.Length <= CacheStore.ReadLimit ? "全部" : $"前 {CacheStore.ReadLimit} 字符")}");
+        builder.AppendLine("- 要看全文：用 `key` + `path` 落盘，再 `read` 它的范围。");
+        builder.AppendLine();
+        builder.AppendLine("```");
+        builder.AppendLine(shown);
+        builder.AppendLine("```");
+        return builder.ToString();
     }
 
     private static string ListPage(int page)

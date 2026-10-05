@@ -403,9 +403,10 @@ public sealed class SymbolQueryTests
     [Fact]
     public void Symbols_reports_an_unknown_member_instead_of_guessing()
     {
-        string output = SymbolTools.Symbols(SelfProjectPath(), "ZMS.MCP.Csharp.Draft.DraftEdit.NoSuchMember");
+        // 转写归共享的调用过滤器：工具方法本身直接抛，异常消息里必须点出那个成员名
+        Exception thrown = Assert.ThrowsAny<Exception>(
+            () => SymbolTools.Symbols(SelfProjectPath(), "ZMS.MCP.Csharp.Draft.DraftEdit.NoSuchMember"));
 
-        Assert.StartsWith("Error: ", output, StringComparison.Ordinal);
-        Assert.Contains("NoSuchMember", output);
+        Assert.Contains("NoSuchMember", thrown.Message);
     }
 }

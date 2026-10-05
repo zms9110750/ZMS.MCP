@@ -23,65 +23,62 @@ public static class ArchiveTools
         [Description("Format to create with: zip / 7z / tgz / ztsd. Ignored when the archive already exists; required when it does not.")] string? format = null,
         [Description("Tracking cookie. Passing it stops tracking and discards the staged changes.")] string? cookie = null)
     {
-        return ToolGuard.Run(() =>
+        Address address = Address.Parse(target, path);
+        if (address is not LocalAddress local)
         {
-            Address address = Address.Parse(target, path);
-            if (address is not LocalAddress local)
+            throw new ArgumentException("只追踪本地的压缩包 —— FTP 上的压缩包追踪不了。");
+        }
+
+        string archivePath = Path.GetFullPath(local.InnerPath);
+
+        // 传回 cookie = 解除追踪，把拟定一并清掉
+        if (!string.IsNullOrWhiteSpace(cookie))
+        {
+            TrackedArchive tracked = ArchiveService.Require(cookie!.Trim());
+            int removed = DraftStore.Untrack(tracked);
+            return $"# 已解除追踪\n- 包：{tracked.ArchivePath}\n- 清掉了 {removed} 条拟定。\n";
+        }
+
+        bool exists = File.Exists(archivePath);
+        string used;
+
+        if (exists)
+        {
+            used = (format ?? "").Trim().Length > 0
+                ? ArchiveService.IsSupported(format!)
+                    ? format!.Trim().ToLowerInvariant()
+                    : throw new ArgumentException($"认不出这个格式：{format}（支持 {ArchiveService.FormatList}）。")
+                : FormatFromExtension(archivePath);
+        }
+        else
+        {
+            if (string.IsNullOrWhiteSpace(format))
             {
-                throw new ArgumentException("只追踪本地的压缩包 —— FTP 上的压缩包追踪不了。");
+                throw new ArgumentException(
+                    $"这个包还不存在，所以要说清楚用什么格式建：{ArchiveService.FormatList}。");
             }
 
-            string archivePath = Path.GetFullPath(local.InnerPath);
-
-            // 传回 cookie = 解除追踪，把拟定一并清掉
-            if (!string.IsNullOrWhiteSpace(cookie))
+            if (!ArchiveService.IsSupported(format!))
             {
-                TrackedArchive tracked = ArchiveService.Require(cookie!.Trim());
-                int removed = DraftStore.Untrack(tracked);
-                return $"# 已解除追踪\n- 包：{tracked.ArchivePath}\n- 清掉了 {removed} 条拟定。\n";
+                throw new ArgumentException($"认不出这个格式：{format}（支持 {ArchiveService.FormatList}）。");
             }
 
-            bool exists = File.Exists(archivePath);
-            string used;
+            used = format!.Trim().ToLowerInvariant();
+        }
 
-            if (exists)
-            {
-                used = (format ?? "").Trim().Length > 0
-                    ? ArchiveService.IsSupported(format!)
-                        ? format!.Trim().ToLowerInvariant()
-                        : throw new ArgumentException($"认不出这个格式：{format}（支持 {ArchiveService.FormatList}）。")
-                    : FormatFromExtension(archivePath);
-            }
-            else
-            {
-                if (string.IsNullOrWhiteSpace(format))
-                {
-                    throw new ArgumentException(
-                        $"这个包还不存在，所以要说清楚用什么格式建：{ArchiveService.FormatList}。");
-                }
+        long size = exists ? new FileInfo(archivePath).Length : 0;
+        long time = exists ? File.GetLastWriteTimeUtc(archivePath).Ticks : 0;
+        string tracking = DraftStore.Track(archivePath, used, size, time);
+        IReadOnlyList<ArchiveDraft> drafts = DraftStore.DraftsOf(archivePath);
 
-                if (!ArchiveService.IsSupported(format!))
-                {
-                    throw new ArgumentException($"认不出这个格式：{format}（支持 {ArchiveService.FormatList}）。");
-                }
-
-                used = format!.Trim().ToLowerInvariant();
-            }
-
-            long size = exists ? new FileInfo(archivePath).Length : 0;
-            long time = exists ? File.GetLastWriteTimeUtc(archivePath).Ticks : 0;
-            string tracking = DraftStore.Track(archivePath, used, size, time);
-            IReadOnlyList<ArchiveDraft> drafts = DraftStore.DraftsOf(archivePath);
-
-            StringBuilder builder = new();
-            builder.AppendLine("# 已开始追踪");
-            builder.AppendLine($"- 包：{archivePath}");
-            builder.AppendLine($"- 格式：{used}" + (exists ? "（已存在）" : "（还不存在，落盘时创建）"));
-            builder.AppendLine($"- 追踪 cookie：`{tracking}`");
-            builder.AppendLine($"- 现在攒了 {drafts.Count} 条拟定。");
-            builder.AppendLine("- 之后 `copy` / `move` / `delete` 打到这个包上只会攒一条，`confirm` 才落盘。");
-            return builder.ToString();
-        });
+        StringBuilder builder = new();
+        builder.AppendLine("# 已开始追踪");
+        builder.AppendLine($"- 包：{archivePath}");
+        builder.AppendLine($"- 格式：{used}" + (exists ? "（已存在）" : "（还不存在，落盘时创建）"));
+        builder.AppendLine($"- 追踪 cookie：`{tracking}`");
+        builder.AppendLine($"- 现在攒了 {drafts.Count} 条拟定。");
+        builder.AppendLine("- 之后 `copy` / `move` / `delete` 打到这个包上只会攒一条，`confirm` 才落盘。");
+        return builder.ToString();
     }
 
     [McpServerTool(ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]
@@ -95,17 +92,14 @@ public static class ArchiveTools
         [Description("Tracking cookie, from track_archive.")] string cookie,
         [Description("Empty = dry run (no disk is touched). Pass the apply cookie from the dry run to actually write.")] string? applyCookie = null)
     {
-        return ToolGuard.Run(() =>
+        if (string.IsNullOrWhiteSpace(cookie))
         {
-            if (string.IsNullOrWhiteSpace(cookie))
-            {
-                throw new ArgumentException("cookie 必填 —— 它是 `track_archive` 给的那个。");
-            }
+            throw new ArgumentException("cookie 必填 —— 它是 `track_archive` 给的那个。");
+        }
 
-            return string.IsNullOrWhiteSpace(applyCookie)
-                ? ArchiveService.Preview(cookie.Trim())
-                : ArchiveService.Apply(cookie.Trim(), applyCookie!);
-        });
+        return string.IsNullOrWhiteSpace(applyCookie)
+            ? ArchiveService.Preview(cookie.Trim())
+            : ArchiveService.Apply(cookie.Trim(), applyCookie!);
     }
 
     /// <summary>按扩展名猜格式。</summary>

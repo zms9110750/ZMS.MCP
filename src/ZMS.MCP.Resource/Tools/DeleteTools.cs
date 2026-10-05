@@ -22,26 +22,23 @@ public static class DeleteTools
         [Description("Cookie for this object (for a directory: from enumerating the whole tree).")] string cookie,
         [Description("Storage target: empty = local file system; 'ftp:<session>' = FTP session; anything else is an archive path.")] string? target = null)
     {
-        return ToolGuard.Run(() =>
+        Address address = Resolve.Address(target, path);
+
+        if (address is LocalAddress local)
         {
-            Address address = Resolve.Address(target, path);
+            return DeleteService.Run(local, cookie);
+        }
 
-            if (address is LocalAddress local)
-            {
-                return DeleteService.Run(local, cookie);
-            }
+        // 压缩包内的条目：不落盘，攒一条拟定；要**这个条目自己**的凭据
+        if (address is ArchiveAddress archive)
+        {
+            TrackedArchive tracked = DraftStore.FindByPath(archive.ArchivePath)
+                ?? throw new ArgumentException(
+                    $"这个压缩包没在追踪：{archive.ArchivePath} —— 先 `track_archive` 再删里面的条目。");
 
-            // 压缩包内的条目：不落盘，攒一条拟定；要**这个条目自己**的凭据
-            if (address is ArchiveAddress archive)
-            {
-                TrackedArchive tracked = DraftStore.FindByPath(archive.ArchivePath)
-                    ?? throw new ArgumentException(
-                        $"这个压缩包没在追踪：{archive.ArchivePath} —— 先 `track_archive` 再删里面的条目。");
+            return ArchiveService.Stage(archive.ArchivePath, "delete", archive.InnerPath, null, cookie);
+        }
 
-                return ArchiveService.Stage(archive.ArchivePath, "delete", archive.InnerPath, null, cookie);
-            }
-
-            throw new ArgumentException("远端删除一律不执行（远端没有回收站，删了不可恢复）——请用户手动处理。");
-        });
+        throw new ArgumentException("远端删除一律不执行（远端没有回收站，删了不可恢复）——请用户手动处理。");
     }
 }

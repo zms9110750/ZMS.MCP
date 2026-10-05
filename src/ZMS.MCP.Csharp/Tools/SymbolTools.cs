@@ -51,17 +51,14 @@ public static class SymbolTools
         [Description("true = also print who references each symbol (no file positions)")] bool references = false,
         [Description("true = also print each symbol's implementation")] bool implementation = false)
     {
-        return ToolGuard.Run(() =>
+        SymbolView view = new(documentation, attributes, references, implementation);
+        LoadedProject project = LoadedProject.Load(csprojPath);
+        if (string.IsNullOrWhiteSpace(path))
         {
-            SymbolView view = new(documentation, attributes, references, implementation);
-            LoadedProject project = LoadedProject.Load(csprojPath);
-            if (string.IsNullOrWhiteSpace(path))
-            {
-                return ListProjectSymbols(project, type, modifier, argsList, nameFilter, view);
-            }
+            return ListProjectSymbols(project, type, modifier, argsList, nameFilter, view);
+        }
 
-            return ReadOrListPath(project, csprojPath, path, view);
-        });
+        return ReadOrListPath(project, csprojPath, path, view);
     }
 
     /// <summary>每个符号要**额外列出**什么 —— 四个"要不要列出"的开关（不是筛选）。</summary>

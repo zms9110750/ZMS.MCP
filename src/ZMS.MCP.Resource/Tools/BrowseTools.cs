@@ -22,6 +22,6 @@ public static class BrowseTools
         [Description("What to wait for when action = 'wait': 'networkidle', 'load', 'domcontentloaded', or a duration like '5s'.")] string? waitFor = null,
         [Description("How long to allow, in seconds. Default 60.")] int timeout = BrowseService.DefaultTimeoutSeconds)
     {
-        return ToolGuard.RunAsync(() => BrowseService.RunAsync(url, action, waitFor, timeout));
+        return BrowseService.RunAsync(url, action, waitFor, timeout);
     }
 }
