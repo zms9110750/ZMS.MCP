@@ -30,14 +30,14 @@ MCP Server 走 stdio，通常由支持 MCP 的客户端（Claude Desktop、VS Co
 }
 ```
 
-`zms9110750.ZMS.MCP.exe` 是**聚合入口**：一个进程提供下列四组工具（共 39 个）。四个项目也各自能独立启动，
+`zms9110750.ZMS.MCP.exe` 是**聚合入口**：一个进程提供下列四组工具（共 40 个）。四个项目也各自能独立启动，
 把上面那行换成 `zms9110750.ZMS.MCP.Csharp.exe` 之类即可，只提供那一组。
 
 ## 项目
 
 | 项目 | 说明 | 工具 |
 |------|------|------|
-| `src/ZMS.MCP` | **聚合入口**：引用下面四个，一个进程同时提供它们的全部工具 | 39 个（不新增） |
+| `src/ZMS.MCP` | **聚合入口**：引用下面四个，一个进程同时提供它们的全部工具 | 40 个（不新增） |
 | `src/ZMS.MCP.Core` | 共享类库：凭据（cookie）、路径规范化、指纹 —— 四个项目都引用它 | — |
 | `src/ZMS.MCP.Csharp` | 基于 **Roslyn** 的 C# 工作区工具：解决方案 / 项目 / 符号 / NuGet / 拟定事务 | 20 |
 | `src/ZMS.MCP.Resource` | 资源访问：本地文件与目录、FTP、压缩包、http、浏览器、缓存、区间抽取 | 15 |
@@ -48,13 +48,16 @@ MCP Server 走 stdio，通常由支持 MCP 的客户端（Claude Desktop、VS Co
 
 ## 文档
 
-需求文档在 `docs/`，实现以文档为基线：
+需求文档在 `docs/`，实现以文档为基线。四份都是**工具手册**——每个工具的准确行为，
+以实机调用结果写成：
 
-- **`docs/ZMS.MCP.Csharp.v4.md`** — C# 工作区工具的**工具手册**（以实机调用结果写成）
-- `docs/ZMS.MCP.Csharp.md` — C# 工作区工具的需求基线；签名在 v4 有变动，见 v4 手册的差异清单
-- `docs/ZMS.MCP.Resource.md` — 资源访问的工具手册
-- `docs/Structured.md` — 结构化文档
-- `docs/Workflow.md` — GitHub Actions 工作流生成
+- **`docs/ZMS.MCP.Csharp.md`** — C# 工作区工具（当前是 v4，20 个工具）
+- `docs/ZMS.MCP.Resource.md` — 资源访问（15 个工具）
+- `docs/ZMS.MCP.Structured.md` — 结构化文档（2 个工具）
+- `docs/ZMS.MCP.Workflow.md` — GitHub Actions 工作流生成（3 个工具）
+
+`plan/` 是另一层：那里放**痛点**（为什么要做）与**提案**（打算怎么做，含备选、缺点、
+以及那些还没定下来的数字）。`docs/` 只写已经做成的样子。
 
 ## 工程约定
 

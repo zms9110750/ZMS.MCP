@@ -44,10 +44,11 @@
 track_project(csprojPath)              → 拿 tracking cookie
    ↓
 rename_symbol(cookie, memberPath, newName)
-        → 语义层找出所有引用，落成一份拟定，返回"改名清单"：
-          拟改哪几个文件、每个文件里改哪几处、哪些地方**明确不动**（同名但不同符号）
+        → 语义层找出所有引用，落成一份拟定：**记的是"改哪个符号、改成什么"**
    ↓
-confirm_draft(cookie, applyCookie)     → 预检（诊断对比）→ 带 applyCookie 落盘
+confirm_draft(cookie, applyCookie)     → 预检：**这时才算"会动哪几处"**，逐个列出要改的
+                                          文件与位置、以及**明确不动**的那些（同名但不同符号）
+                                        → 带 applyCookie 落盘
 ```
 
 **关键在"明确不动"这一节。** 返回里要**点名**那些"名字相同但不是它"的位置，
