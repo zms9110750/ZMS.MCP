@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **项目** | `src/ZMS.MCP.Csharp` |
-| **痛点** | [F9](../F9-分不清名字指哪个符号.md)（"这个包到底有什么 API" 是它的前一半）、[F1](../F1-别人改了文件.md) |
+| **痛点** | [F9](../F9-分不清名字指哪个符号.md)（"这个包到底有什么 API" 是它的前一半）、[F1](../改动的可信度.md) |
 | **状态** | 已实现 |
 | **工具** | `list_project_packages`、`search_packages`、`list_package_versions`、`get_package_metadata`、`install_packages`、`remove_packages`、`list_doc_symbols` |
 

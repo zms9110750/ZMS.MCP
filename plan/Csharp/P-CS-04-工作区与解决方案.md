@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **项目** | `src/ZMS.MCP.Csharp` |
-| **痛点** | [F5](../F5-失败了却像成功.md)（"没扫到"必须与"没有"分开）、[F1](../F1-别人改了文件.md) |
+| **痛点** | [F5](../改动的可信度.md)（"没扫到"必须与"没有"分开）、[F1](../改动的可信度.md) |
 | **状态** | 已实现 |
 | **工具** | `scan_projects`、`view_project_or_solution`、`add_project_to_solution`、`remove_project_from_solution`、`migrate_solution_to_slnx`、`edit_project_metadata` |
 
